@@ -1,0 +1,27 @@
+# Compilation/Build
+build/
+build_cli/
+.cache/
+bin/
+obj/
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+
+# Database files
+*.db
+*.log
+
+# IDEs
+.vscode/
+.vs/
+*.swp
+*.swo
+
+# Project specific
+relational_db.exe
+test.db

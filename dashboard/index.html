@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Database Observability Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="brand">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="primary"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <h1>StorageEngine v1.0</h1>
+            </div>
+            <div class="status-container">
+                <div class="status-badge" id="mainStatusBadge">
+                    <span id="statusDot" class="status-dot"></span>
+                    <span id="statusText">INITIALIZING...</span>
+                </div>
+                <button id="modeToggleBtn" class="mode-toggle">SWITCH TO LIVE ENGINE</button>
+            </div>
+        </header>
+
+        <section class="telemetry-ribbon">
+            <div class="metric-card">
+                <span class="metric-label">Cache Hit Rate (Clock)</span>
+                <span class="metric-value" id="cacheHitRate">0.00%</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-label">Query Throughput (QPS)</span>
+                <span class="metric-value" id="queryThroughput">0.0</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-label">Avg Disk I/O Latency</span>
+                <span class="metric-value" id="ioLatency">0.0ms</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-label">Active Thread Latches</span>
+                <span class="metric-value" id="activeLatches">0</span>
+            </div>
+        </section>
+
+        <main class="dashboard-grid">
+            <section class="panel" id="queryConsolePanel">
+                <div class="panel-header">
+                    <h2>SQL Execution Console</h2>
+                </div>
+                <div class="console-container">
+                    <span class="prompt">db-engine></span>
+                    <input type="text" id="sqlInput" class="console-input" placeholder="Enter SQL command (e.g., SELECT * FROM Users)..." spellcheck="false" autocomplete="off">
+                </div>
+                <div class="panel-content" id="queryLogContainer" style="padding: 0; overflow-y: auto; height: 400px;">
+                    <table style="width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.8125rem;">
+                        <thead style="position: sticky; top: 0; background: var(--surface); box-shadow: 0 1px var(--border); z-index: 10;">
+                            <tr>
+                                <th style="text-align: left; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500; width: 100px;">Timestamp</th>
+                                <th style="text-align: left; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500; width: 200px;">Command</th>
+                                <th style="text-align: left; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500;">Execution Trace</th>
+                                <th style="text-align: right; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500; width: 80px;">Latency</th>
+                            </tr>
+                        </thead>
+                        <tbody id="queryLogBody">
+                            <!-- Rows prepended here -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel" id="bufferPoolPanel">
+                <div class="panel-header">
+                    <h2>Storage & Buffer Subsystem</h2>
+                    <span id="pinCount" style="font-size: 0.75rem; color: var(--muted);">0/50 frames pinned</span>
+                </div>
+                
+                <div class="panel-content" id="bufferPoolHeatmap" style="display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; padding: 1rem; align-content: start;">
+                    <!-- 50 Frames injected by JS -->
+                </div>
+
+                <!-- Compact Shape-Based Execution Pipeline -->
+                <div class="compact-pipeline">
+                    <div class="pipe-node hexagon" id="pipe-parser" title="SQL Parser"><span>PARSER</span></div>
+                    <div class="pipe-arrow">→</div>
+                    <div class="pipe-node rhombus" id="pipe-index" title="B+ Tree Index"><span>INDEX</span></div>
+                    <div class="pipe-arrow">→</div>
+                    <div class="pipe-node square" id="pipe-buffer" title="Buffer Pool"><span>BUFFER</span></div>
+                    <div class="pipe-arrow">→</div>
+                    <div class="pipe-node cylinder" id="pipe-disk" title="Disk I/O"><span>DISK</span></div>
+                </div>
+
+                <div class="heatmap-legend" style="padding: 0.5rem 1rem; border-top: 1px solid var(--border); display: flex; gap: 1rem; font-size: 0.7rem; color: var(--muted);">
+                    <div style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; background: #27272a; border-radius: 2px;"></span> Idle</div>
+                    <div style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; background: var(--primary); border-radius: 2px;"></span> Pinned</div>
+                    <div style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border: 1px solid var(--warning); border-radius: 2px;"></span> Clock Hand</div>
+                </div>
+            </section>
+
+            <section class="panel" id="schemaPanel" style="grid-column: 1 / -1;">
+                <div class="panel-header">
+                    <h2>Relational Schema Atlas</h2>
+                </div>
+                <div class="panel-content" id="topologyContainer" style="padding: 0; overflow: hidden; position: relative; background: radial-gradient(circle at center, #111827 0%, #09090b 100%);">
+                    <svg id="topologySvg" width="100%" height="450" style="display: block;">
+                        <g id="viewport">
+                            <!-- SVG content drawn by JS -->
+                        </g>
+                    </svg>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="index.js"></script>
+</body>
+</html>
