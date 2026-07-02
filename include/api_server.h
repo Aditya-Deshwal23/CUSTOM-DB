@@ -11,6 +11,7 @@
 #include <sstream>
 #include <mutex>
 #include <future>
+#include <utility>
 #include "crow.h"
 #include "crow/middlewares/cors.h"
 
@@ -18,8 +19,14 @@ namespace relational_db {
 
 class ApiServer {
 public:
-    ApiServer(std::shared_ptr<BufferPoolManager> bpm, std::shared_ptr<DiskManager> disk_manager, std::shared_ptr<Executor> executor)
-        : bpm_(bpm), disk_manager_(disk_manager), executor_(executor) {
+    ApiServer(std::shared_ptr<BufferPoolManager> bpm,
+              std::shared_ptr<DiskManager> disk_manager,
+              std::shared_ptr<Executor> executor,
+              std::string dashboard_path = "dashboard")
+        : bpm_(bpm),
+          disk_manager_(disk_manager),
+          executor_(executor),
+          dashboard_path_(std::move(dashboard_path)) {
         
         // Step 2: Bulletproof CORS configuration
         auto& cors = app_.get_middleware<crow::CORSHandler>();
@@ -36,37 +43,25 @@ public:
 
     void Run(int port = 8080) {
         CROW_ROUTE(app_, "/")
-        ([](){
-            std::ifstream file("dashboard/index.html");
-            if (!file.is_open()) file.open("../dashboard/index.html");
-            if (!file.is_open()) return crow::response(404, "index.html not found");
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            return crow::response(buffer.str());
+        ([this](){
+            return ServeStaticFile("index.html", "text/html");
         });
 
         CROW_ROUTE(app_, "/index.css")
-        ([](){
-            std::ifstream file("dashboard/index.css");
-            if (!file.is_open()) file.open("../dashboard/index.css");
-            if (!file.is_open()) return crow::response(404, "index.css not found");
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            auto res = crow::response(buffer.str());
-            res.add_header("Content-Type", "text/css");
-            return res;
+        ([this](){
+            return ServeStaticFile("index.css", "text/css");
         });
 
         CROW_ROUTE(app_, "/index.js")
+        ([this](){
+            return ServeStaticFile("index.js", "application/javascript");
+        });
+
+        CROW_ROUTE(app_, "/health")
         ([](){
-            std::ifstream file("dashboard/index.js");
-            if (!file.is_open()) file.open("../dashboard/index.js");
-            if (!file.is_open()) return crow::response(404, "index.js not found");
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            auto res = crow::response(buffer.str());
-            res.add_header("Content-Type", "application/javascript");
-            return res;
+            crow::json::wvalue res;
+            res["status"] = "ok";
+            return crow::response(res);
         });
 
         CROW_ROUTE(app_, "/api/metrics")
@@ -96,17 +91,32 @@ public:
             return crow::response(res);
         });
 
-        app_.port(port).multithreaded().run();
+        app_.bindaddr("0.0.0.0").port(port).multithreaded().run();
     }
 
     void SetCacheHitRate(int rate) { cache_hit_rate_ = rate; }
     void Stop() { app_.stop(); }
 
 private:
+    crow::response ServeStaticFile(const std::string& file_name, const std::string& content_type) const {
+        const std::string path = dashboard_path_ + "/" + file_name;
+        std::ifstream file(path);
+        if (!file.is_open()) {
+            return crow::response(404, file_name + " not found");
+        }
+
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        auto res = crow::response(buffer.str());
+        res.add_header("Content-Type", content_type);
+        return res;
+    }
+
     std::shared_ptr<BufferPoolManager> bpm_;
     std::shared_ptr<DiskManager> disk_manager_;
     std::shared_ptr<Executor> executor_;
     crow::App<crow::CORSHandler> app_;
+    std::string dashboard_path_;
 
     std::atomic<int> cache_hit_rate_{0};
     std::atomic<int> query_rate_{0};

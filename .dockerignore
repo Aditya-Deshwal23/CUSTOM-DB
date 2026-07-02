@@ -1,0 +1,15 @@
+build/
+.git/
+*.db
+*.log
+.DS_Store
+
+# Temporary/editor files
+*.swp
+*.swo
+*~
+.#*
+.idea/
+.vscode/
+tmp/
+temp/

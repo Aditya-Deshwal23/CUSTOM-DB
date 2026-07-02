@@ -1,0 +1,13 @@
+services:
+  custom-db:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DB_PATH: /data/custom.db
+    volumes:
+      - custom-db-data:/data
+
+volumes:
+  custom-db-data:
