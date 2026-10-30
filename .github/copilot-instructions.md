@@ -1,0 +1,7 @@
+- Scope guard: C++17 + Crow + vanilla JS + one Docker service on Render. Never change language/framework/deployment target; no JS framework or build step. /health, /api/metrics, /api/query must keep working (deprecated aliases are fine).
+- Honesty: never fabricate or simulate numbers in engine, API or UI (no rand()/Math.random() for metrics). Every claim in README/docs must map to a test, benchmark or CI job listed in docs/CLAIMS.md.
+- Workflow: failing test first; small commits; before saying "done" run build (Debug+Release), ctest, ASan+UBSan, and TSan for concurrent code, and paste a summary of the output.
+- Code: RAII only (no naked new/delete, no owning raw pointers); typed errors (DbError{ErrorCode,...}); never `catch (...)` and swallow; constexpr instead of macros; warning-clean under -Wall -Wextra -Wpedantic; 64-bit counters; explicit-endian on-disk formats with static_asserts on sizes/offsets, documented in docs/FILE_FORMAT.md.
+- Concurrency: no I/O under a global mutex; lock order documented in docs/CONCURRENCY.md; every concurrent component gets a TSan stress test that prints its seed.
+- Portability: Linux is the reference; keep MinGW/UCRT64 compiling (POSIX-only code behind #ifdef _WIN32 fallbacks). Crash/sanitizer tests run on Linux/WSL2/devcontainer.
+- Done = acceptance criteria met + docs updated + docs/CLAIMS.md updated + CI green.
