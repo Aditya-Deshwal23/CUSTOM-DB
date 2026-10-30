@@ -35,15 +35,15 @@ private:
     // Explicit standard shared_mutex
     std::shared_mutex root_latch_;
 
-    PageGuard FindLeafPageWithLatchCrabbing(const KeyType &key);
-    Page *FindLeafPage(const KeyType &key);
+    ReadPageGuard FindLeafPageWithLatchCrabbing(const KeyType &key);
+    WritePageGuard FindLeafPage(const KeyType &key);
 
     void StartNewTree(const KeyType &key, const ValueType &value);
     bool InsertIntoLeaf(const KeyType &key, const ValueType &value);
     void InsertIntoParent(BPlusTreePage *old_node, const KeyType &key, BPlusTreePage *new_node);
 
     template <typename N>
-    N *Split(N *node);
+    WritePageGuard Split(N *node);
 };
 
 } // namespace relational_db

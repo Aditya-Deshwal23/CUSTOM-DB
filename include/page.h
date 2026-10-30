@@ -2,43 +2,41 @@
 #define PAGE_H
 
 #include "config.h"
+
+#include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <shared_mutex>
 
 namespace relational_db {
 
-/**
- * @brief Page represents a block of memory (PAGE_SIZE bytes) managed by the BufferPoolManager.
- */
-class Page {
-public:
-    Page() { ResetMemory(); }
-    ~Page() = default;
+enum class IoState { READY, LOADING, WRITING_BACK };
 
-    inline char* GetData() { return data_; }
-    inline page_id_t GetPageId() const { return page_id_; }
-    inline int GetPinCount() const { return pin_count_; }
-    inline bool IsDirty() const { return is_dirty_; }
+struct Frame {
+    alignas(PAGE_SIZE) std::array<char, PAGE_DATA_SIZE> data{};
+    std::atomic<int> pin_count{0};
+    std::atomic<bool> dirty{false};
+    page_id_t page_id{INVALID_PAGE_ID};
+    std::shared_mutex rwlatch;
+    IoState io_state{IoState::READY};
+    std::condition_variable condition;
+    uint64_t lsn{0};
 
-    void RLock() { page_latch_.lock_shared(); }
-    void RUnlock() { page_latch_.unlock_shared(); }
-    void WLock() { page_latch_.lock(); }
-    void WUnlock() { page_latch_.unlock(); }
+    Frame() = default;
+    Frame(const Frame&) = delete;
+    Frame& operator=(const Frame&) = delete;
 
-protected:
-    friend class BufferPoolManager;
-
-    inline void ResetMemory() { std::memset(data_, 0, PAGE_SIZE); }
-
-    char data_[PAGE_SIZE]{};
-    page_id_t page_id_ = INVALID_PAGE_ID;
-    int pin_count_ = 0;
-    bool is_dirty_ = false;
-
-    // Explicit standard shared_mutex
-    std::shared_mutex page_latch_;
+    Frame(Frame&& other) noexcept
+        : data(other.data),
+          pin_count(other.pin_count.load(std::memory_order_relaxed)),
+          dirty(other.dirty.load(std::memory_order_relaxed)),
+          page_id(other.page_id),
+          io_state(other.io_state),
+          lsn(other.lsn) {}
+    Frame& operator=(Frame&&) = delete;
 };
 
-} // namespace relational_db
+}  // namespace relational_db
 
-#endif // PAGE_H
+#endif

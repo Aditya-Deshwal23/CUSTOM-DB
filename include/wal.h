@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include <fstream>
 #include <mutex>
 
 namespace relational_db {
@@ -43,8 +42,8 @@ public:
 
 private:
     std::string filename_;
-    std::ofstream wal_file_;
-    
+    int file_descriptor_{-1};
+
     // Explicit standard mutex
     std::mutex latch_;
     

@@ -8,7 +8,8 @@
 namespace relational_db {
 
 #define INTERNAL_PAGE_HEADER_SIZE BPlusTreePage::HEADER_SIZE
-#define INTERNAL_PAGE_SIZE ((PAGE_SIZE - INTERNAL_PAGE_HEADER_SIZE) / (sizeof(std::pair<KeyType, ValueType>)))
+#define INTERNAL_PAGE_SIZE \
+    ((PAGE_DATA_SIZE - INTERNAL_PAGE_HEADER_SIZE) / (sizeof(std::pair<KeyType, ValueType>)))
 
 /**
  * @brief Internal page does not store actual records, only keys and page IDs representing

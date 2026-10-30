@@ -1,0 +1,20 @@
+name: Nightly storage checks
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  exhaustive-page-checksum:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRELDB_WERROR=ON
+      - name: Build tests
+        run: cmake --build build --parallel --target reldb_regression_tests
+      - name: Exhaustively flip every page bit
+        env:
+          RELDB_EXHAUSTIVE_PAGE_CHECKSUM: "1"
+        run: build/reldb_regression_tests --gtest_filter=DiskManagerTest.DetectsSingleBitErrorsInSampledOrExhaustivePageBits

@@ -13,7 +13,7 @@ SlottedPage::SlottedPage(char* data) : data_(data) {
 void SlottedPage::Init(page_id_t page_id) {
     *page_id_ptr_ = page_id;
     *num_slots_ptr_ = 0;
-    *free_space_ptr_ = PAGE_SIZE;
+    *free_space_ptr_ = PAGE_DATA_SIZE;
 }
 
 Slot* SlottedPage::GetSlot(uint16_t slot_id) const {
@@ -94,8 +94,8 @@ bool SlottedPage::DeleteTuple(uint16_t slot_id) {
 
 void SlottedPage::Compact() {
     // Create a temporary buffer for compacted data
-    std::vector<char> temp_buffer(PAGE_SIZE, 0);
-    uint16_t temp_free_space = PAGE_SIZE;
+    std::vector<char> temp_buffer(PAGE_DATA_SIZE, 0);
+    uint16_t temp_free_space = PAGE_DATA_SIZE;
 
     // Move all active tuples to the end of the temp buffer
     for (uint16_t i = 0; i < *num_slots_ptr_; ++i) {
@@ -108,8 +108,9 @@ void SlottedPage::Compact() {
     }
 
     // Copy the compacted data back to the original page
-    std::memcpy(data_ + temp_free_space, temp_buffer.data() + temp_free_space, PAGE_SIZE - temp_free_space);
-    
+    std::memcpy(data_ + temp_free_space, temp_buffer.data() + temp_free_space,
+                PAGE_DATA_SIZE - temp_free_space);
+
     // Update the free space pointer
     *free_space_ptr_ = temp_free_space;
 }

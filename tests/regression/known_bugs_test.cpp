@@ -125,7 +125,7 @@ TEST(DurabilityTest, DISABLED_HardKillKeepsAckedWrites) {
 #endif
 }
 
-TEST(BPlusTreeTest, DISABLED_LookupsNeverFalseMissAfterManyInserts) {
+TEST(BPlusTreeTest, LookupsNeverFalseMissAfterManyInserts) {
     TemporaryPath path;
     auto bpm = MakeBufferPool(path.String());
     BPlusTree<int, int, std::less<int>> tree(bpm, std::less<int>());

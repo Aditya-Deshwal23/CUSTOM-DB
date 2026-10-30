@@ -63,9 +63,11 @@ endif()
 find_package(Threads REQUIRED)
 
 add_library(reldb_core STATIC
+  src/crc32c.cpp
   src/disk_manager.cpp
   src/slotted_page.cpp
   src/clock_replacer.cpp
+  src/page_allocator.cpp
   src/buffer_pool_manager.cpp
   src/b_plus_tree.cpp
   src/executor.cpp
@@ -112,28 +114,41 @@ endfunction()
 
 if(RELDB_BUILD_TESTS)
   enable_testing()
-  add_executable(reldb_regression_tests tests/regression/known_bugs_test.cpp)
+  add_executable(reldb_regression_tests
+    tests/regression/known_bugs_test.cpp
+    tests/disk_manager_test.cpp
+    tests/buffer_pool_test.cpp
+  )
   target_compile_definitions(reldb_regression_tests PRIVATE
     RELDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     RELDB_SERVER_BINARY="$<TARGET_FILE:relational_db>"
   )
-  target_include_directories(reldb_regression_tests PRIVATE include)
+  target_include_directories(reldb_regression_tests PRIVATE include tests)
   target_link_libraries(reldb_regression_tests PRIVATE reldb_core GTest::gtest_main)
   add_dependencies(reldb_regression_tests relational_db)
   add_test(NAME reldb_regression_tests COMMAND reldb_regression_tests)
+
+  add_executable(reldb_disk_sync_probe tests/disk_sync_probe.cpp)
+  target_include_directories(reldb_disk_sync_probe PRIVATE include)
+  target_link_libraries(reldb_disk_sync_probe PRIVATE reldb_core)
 endif()
 
 if(RELDB_BUILD_BENCHMARKS)
   add_executable(reldb_benchmarks bench/b_plus_tree_bench.cpp)
   target_link_libraries(reldb_benchmarks PRIVATE reldb_core benchmark::benchmark)
+  add_executable(reldb_disk_benchmarks bench/bench_disk.cpp)
+  target_link_libraries(reldb_disk_benchmarks PRIVATE reldb_core benchmark::benchmark)
+  add_executable(reldb_buffer_pool_benchmarks bench/bench_buffer_pool.cpp)
+  target_link_libraries(reldb_buffer_pool_benchmarks PRIVATE reldb_core benchmark::benchmark)
 endif()
 
 set(project_targets reldb_core relational_db)
 if(RELDB_BUILD_TESTS)
   list(APPEND project_targets reldb_regression_tests)
+  list(APPEND project_targets reldb_disk_sync_probe)
 endif()
 if(RELDB_BUILD_BENCHMARKS)
-  list(APPEND project_targets reldb_benchmarks)
+  list(APPEND project_targets reldb_benchmarks reldb_disk_benchmarks reldb_buffer_pool_benchmarks)
 endif()
 foreach(target IN LISTS project_targets)
   reldb_configure_project_target(${target})

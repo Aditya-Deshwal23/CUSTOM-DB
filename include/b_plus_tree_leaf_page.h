@@ -8,7 +8,8 @@
 namespace relational_db {
 
 #define LEAF_PAGE_HEADER_SIZE (BPlusTreePage::HEADER_SIZE + sizeof(page_id_t))
-#define LEAF_PAGE_SIZE ((PAGE_SIZE - LEAF_PAGE_HEADER_SIZE) / (sizeof(std::pair<KeyType, ValueType>)))
+#define LEAF_PAGE_SIZE \
+    ((PAGE_DATA_SIZE - LEAF_PAGE_HEADER_SIZE) / (sizeof(std::pair<KeyType, ValueType>)))
 
 /**
  * @brief Leaf page stores the actual data (or record IDs).

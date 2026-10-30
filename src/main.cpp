@@ -4,8 +4,6 @@
 #include <string>
 #include <chrono>
 #include <random>
-#include <fstream>
-#include <sstream>
 #include <thread>
 #include <mutex>
 #include <cstdlib>
@@ -88,7 +86,7 @@ int main() {
                   << std::endl;
         return 1;
     }
-    auto bpm = std::make_shared<BufferPoolManager>(50, disk_manager);
+    auto bpm = std::make_shared<BufferPoolManager>(disk_manager);
     auto executor = std::make_shared<Executor>(bpm);
     auto api_server = std::make_shared<ApiServer>(bpm, disk_manager, executor, dashboard_path);
 
@@ -119,8 +117,8 @@ int main() {
         int queries_this_sec = 0;
         int total_latency = 0;
         int errors = 0;
-        int last_hits = 0;
-        int last_misses = 0;
+        uint64_t last_hits = 0;
+        uint64_t last_misses = 0;
 
         auto last_tick = std::chrono::steady_clock::now();
 
@@ -145,11 +143,14 @@ int main() {
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - last_tick).count() >= 1) {
                 int avg_latency = queries_this_sec > 0 ? (total_latency / queries_this_sec) : 0;
-                int current_hits = bpm->GetHits();
-                int current_misses = bpm->GetMisses();
+                const uint64_t current_hits = bpm->GetHits();
+                const uint64_t current_misses = bpm->GetMisses();
                 
-                int delta_total = (current_hits - last_hits) + (current_misses - last_misses);
-                int hit_rate = delta_total == 0 ? 0 : ((current_hits - last_hits) * 100) / delta_total;
+                const uint64_t delta_hits = current_hits - last_hits;
+                const uint64_t delta_misses = current_misses - last_misses;
+                const uint64_t delta_total = delta_hits + delta_misses;
+                const int hit_rate =
+                    delta_total == 0 ? 0 : static_cast<int>((delta_hits * 100U) / delta_total);
 
                 api_server->SetCacheHitRate(hit_rate);
                 api_server->SetMetrics(queries_this_sec, avg_latency, errors);

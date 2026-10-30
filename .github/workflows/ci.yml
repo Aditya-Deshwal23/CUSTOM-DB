@@ -24,6 +24,12 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Install strace for the Linux sync check
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Verify disk sync syscalls
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: scripts/verify_disk_syncs.sh build/reldb_disk_sync_probe
       - name: Check metrics honesty
         run: build/reldb_regression_tests --gtest_also_run_disabled_tests --gtest_filter=MetricsTest.DISABLED_NoFabricatedValues
       - name: Verify HTTP examples and shutdown
@@ -70,10 +76,13 @@ jobs:
         run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=thread -DRELDB_WERROR=ON
       - name: Build
         run: cmake --build build-tsan --parallel
+      - name: Prepare TSan runtime
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Run disk manager TSan stress
+        run: build-tsan/reldb_regression_tests --gtest_filter=DiskManagerTest.ConcurrentDistinctPageIo
       - name: Run TSan regression
         shell: bash
         run: |
-          sudo sysctl vm.mmap_rnd_bits=28
           GTEST_FILTER='ConcurrencyTest.DISABLED_ReaderWriterTsanClean' scripts/run_known_bugs.sh build-tsan/reldb_regression_tests | tee tsan.log
           grep -q 'ThreadSanitizer: data race' tsan.log
       - name: Upload TSan log on failure

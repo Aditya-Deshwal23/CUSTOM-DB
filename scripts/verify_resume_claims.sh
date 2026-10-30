@@ -32,6 +32,9 @@ done
 curl --silent --fail "http://127.0.0.1:$port/" | grep -q '<!DOCTYPE html>'
 curl --silent --fail "http://127.0.0.1:$port/index.css" >/dev/null
 curl --silent --fail "http://127.0.0.1:$port/index.js" >/dev/null
+buffer_pool="$(curl --silent --fail "http://127.0.0.1:$port/api/buffer_pool")"
+grep -q '"pinned_frames"' <<<"$buffer_pool"
+grep -q '"frames"' <<<"$buffer_pool"
 metrics="$(curl --silent --fail "http://127.0.0.1:$port/api/metrics")"
 grep -q '"query_throughput"' <<<"$metrics"
 grep -q '"source":"synthetic_workload"' <<<"$metrics"
@@ -61,4 +64,4 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=""
 
-echo 'Verified health check, static dashboard assets, session-scoped INSERT/SELECT, input validation, and SIGTERM shutdown.'
+echo 'Verified health, static assets, buffer-pool snapshot, INSERT/SELECT, validation, and SIGTERM shutdown.'

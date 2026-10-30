@@ -7,6 +7,8 @@ namespace relational_db {
 
 // Define the global page size (e.g., 4KB)
 constexpr static const uint32_t PAGE_SIZE = 4096;
+constexpr static const uint32_t PAGE_HEADER_SIZE = 16;
+constexpr static const uint32_t PAGE_DATA_SIZE = PAGE_SIZE - PAGE_HEADER_SIZE;
 
 // Type alias for page identifiers
 using page_id_t = int32_t;

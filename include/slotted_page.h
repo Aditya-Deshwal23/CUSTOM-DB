@@ -17,12 +17,12 @@ struct Slot {
 };
 
 /**
- * @brief SlottedPage provides an interface over raw page memory to manage 
+ * @brief SlottedPage provides an interface over raw page memory to manage
  * variable-length records.
- * 
+ *
  * Memory Layout:
  * -------------------------------------------------------------
- * | PageHeader | SlotArray ---> | FreeSpace | <--- Tuple Data |
+ * | SlotPageHeader | SlotArray ---> | FreeSpace | <--- Tuple Data |
  * -------------------------------------------------------------
  */
 class SlottedPage {
@@ -32,7 +32,7 @@ public:
 
     /**
      * @brief Constructor wrappers the raw data buffer.
-     * @param data The 4KB buffer (typically from Page::GetData()).
+     * @param data The page body buffer obtained from a page guard.
      */
     explicit SlottedPage(char* data);
 

@@ -1,23 +1,60 @@
 # Concurrency model and known gaps
 
-This records lock interactions visible in the current implementation. It is not a claim that the engine is race-free.
+## Buffer pool
 
-## Observed lock order
+`BufferPoolManager::pool_mutex_` protects the page table, free-frame/free-page
+lists, frame IDs, and I/O-state transitions. The replacer has its own mutex;
+when both are held, the order is pool mutex then replacer mutex. No disk read,
+write, extension, or sync is performed while holding the pool mutex.
 
-When nested, the current acquisition order is:
+Each frame has a read/write latch and a condition variable. A fetch that finds
+a `LOADING` or `WRITING_BACK` mapping waits on that frame's condition variable;
+the wait releases the pool mutex, and all waiters for the page use the same
+published frame. A miss reserves/remaps the frame and publishes its I/O state
+under the mutex, then performs eviction write-back and page read outside it.
+Failed I/O restores the old mapping and contents or returns a previously free
+frame.
 
-1. `BPlusTree::root_latch_`
-2. `BufferPoolManager::latch_`
-3. `ClockReplacer::latch_`
-4. `DiskManager::db_io_latch_`
+The server reads `BUFFER_POOL_FRAMES` (default 4096; environment values below
+16 or outside the frame-ID range fail startup) and
+`BUFFER_POOL_POLICY=clock|lruk` (default `lruk`, K=2). Explicit constructor
+sizes remain available to tests, including smaller exhaustion/stress pools.
+`/api/buffer_pool` returns the 64-bit counters, pinned-frame gauge, and at most
+4096 frame snapshots.
 
-`Page::page_latch_` is acquired after `FetchPage` returns, so current code does not establish a safe writer order around page mutation. `GetValue` uses a page read guard; insertion paths do not consistently take a page write latch. The regression test `ConcurrencyTest.DISABLED_ReaderWriterTsanClean` records the known read/write race.
+Fetches pin before acquiring a page latch and acquire that latch only after
+releasing the pool mutex. Guards release the page latch before decrementing the
+pin under the pool mutex. `FlushFrame` takes the page latch and briefly reads
+frame metadata under the pool mutex; the pool mutex is never held while waiting
+for a page latch. `PageAllocator` accesses page-zero metadata and page contents
+through guards. Page retirement marks the frame unavailable before write-back,
+then removes its mapping and records its free-list status.
 
-## Known invariant violations
+`AssertNoPinsHeld()` checks guards owned by the calling thread, so the Debug
+HTTP request check is not confused by unrelated concurrent requests. The
+`pinned_frames()` gauge remains pool-wide. A guard must not outlive its
+`BufferPoolManager` or be destroyed on a different thread from the one that
+acquired its page latch.
 
-- `BufferPoolManager` holds its global pool latch while invoking `DiskManager` reads and writes. This is I/O under a global mutex and must be removed in a future concurrency phase.
-- The B+ tree uses a root lock to serialize insertion but that does not make page contents safe against concurrent readers.
-- `PageGuard` releases the page latch but does not unpin the buffer-pool page; repeated lookups can exhaust frames.
-- API metrics are sampled from a separate synthetic workload and do not provide a complete concurrency view.
+## Other lock interactions
 
-The CI TSan job runs the disabled reader/writer stress case as a known-bug reproduction. The test prints its fixed seed so a report can be reproduced.
+`BPlusTree::root_latch_` serializes writers and protects root traversal.
+Read/write page guards protect page contents. The current B+ tree algorithms
+are still a prototype: scans, split behavior, root persistence, and
+transactional allocation are not certified.
+
+`FileDiskManager::header_mutex_` serializes page-zero metadata reads/writes and
+file extension. POSIX page reads and writes use positional I/O and do not take
+a global disk-I/O mutex. Windows seek-plus-I/O uses its descriptor mutex.
+
+## Validation and known gaps
+
+`BufferPoolStressTest.SixteenThreadsOneMillionVerifiedOperations` exercises
+16 threads with one million page-ID/CRC-verified operations per thread and
+prints its seed. `DiskManagerTest.ConcurrentDistinctPageIo` exercises
+independent page I/O. Run the buffer-pool stress test under TSan as well as
+ASan/UBSan on the Linux CI host.
+
+No WAL/no-steal implementation is included in this phase. The default
+write-back policy allows dirty pages; Phase 5 must install a policy that
+enforces WAL ordering.
