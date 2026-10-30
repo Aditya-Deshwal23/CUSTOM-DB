@@ -1,4 +1,4 @@
-# Database file format v2
+# Database file format v2 and storage payloads
 
 The database file is a sequence of 4096-byte pages addressed by
 `page_id * 4096`. All multibyte values in this format are unsigned/signed
@@ -23,10 +23,10 @@ four bytes. Types are `HEADER=0`, `FREE=1`, `BTREE_INTERNAL=2`,
 are reserved. Flags and LSN are currently zero unless a higher layer supplies
 them. An all-zero page image is a valid never-written page.
 
-The disk-manager API reads and writes the 4080-byte body after this header.
-Existing buffer-pool page structures use this body; their available capacity
-is therefore 4080 bytes. The disk manager constructs or validates the common
-header and never exposes it as B+ tree payload.
+The disk-manager and buffer-pool APIs expose only the 4080-byte body after
+this header. The disk manager constructs or validates the common header and
+never exposes it as payload. Body offsets below are relative to byte 16 of the
+physical page.
 
 ## Page zero: database header
 
@@ -57,13 +57,150 @@ terminates the list. Page-zero metadata is updated through a page guard and
 written with refreshed header and page CRC32C values. This allocator is not
 transactional and does not provide crash-safe free-list updates.
 
+## Table heap header page
+
+A table heap has a caller-owned header page. Its first eight body bytes are:
+
+| Body offset | Width | Field |
+|---:|---:|---|
+| 0 | 4 | First data page ID (`-1` for an empty heap) |
+| 4 | 4 | Last data page ID (`-1` for an empty heap) |
+
+Both IDs are signed little-endian 32-bit values and must either both be `-1`
+or both name data pages. The remaining 4072 bytes are reserved and initialized
+to zero. The page itself has the common 16-byte header described above.
+
+## Table heap data page
+
+The common physical page header is followed by a 4080-byte body. The body
+starts with this eight-byte heap metadata header:
+
+| Body offset | Width | Field |
+|---:|---:|---|
+| 0 | 2 | Number of slots |
+| 2 | 2 | Free-space pointer |
+| 4 | 4 | Next data page ID (`-1` at the tail) |
+
+The metadata and all slot fields are little-endian. The slot directory starts
+at body offset 8 and grows upward; tuple bytes are packed downward from body
+offset 4080. `free_ptr` is the lowest tuple-byte offset. The slot directory
+end must not exceed `free_ptr`.
+
+Each slot is exactly five bytes:
+
+| Slot offset | Width | Field |
+|---:|---:|---|
+| 0 | 2 | Tuple offset relative to the body |
+| 2 | 2 | Tuple length |
+| 4 | 1 | Flags; bit 0 is `TOMBSTONE` |
+
+A tombstone has zero offset and length and remains in the directory so RIDs
+for other slots do not change. An active zero-length tuple has flags zero and
+is therefore distinct from a deleted tuple. Insert reuses tombstoned slots.
+Compaction sorts active slots by tuple offset and moves tuples in place; slot
+numbers are preserved. Update compacts first and either replaces the tuple in
+the same slot or reports that it needs a new RID.
+
+The physical common header is 16 bytes, followed by 8 bytes of heap metadata,
+then five-byte slot entries and tuple data. `PageHeader` is statically
+asserted to 16 bytes in `include/disk_manager.h`; heap metadata, slot, table
+header, and tuple-size constants are statically asserted in
+`include/storage/storage_format.h`.
+
+## Tuple encoding
+
+A tuple contains a null bitmap followed by a fixed area in schema column order.
+The bitmap uses one bit per column, with bit 1 indicating NULL. Fixed-width
+fields use 4 bytes for `INT`, 8 for `BIGINT`, 8 for `DOUBLE`, and 1 for
+`BOOLEAN`. A `VARCHAR(n)` uses a four-byte fixed descriptor containing a
+little-endian u16 offset and u16 length; its bytes are stored after the fixed
+area, in column order. Offsets are relative to the start of the tuple. NULL
+fixed fields are zero-filled, NULL VARCHAR descriptors are `(0, 0)`, and an
+empty non-NULL string has length zero with its own offset. VARCHAR length is
+limited to 255 bytes. Schema validation checks unique non-empty column names,
+types, VARCHAR declarations, row value types, and non-NULL primary keys.
+
+`MAX_TUPLE_SIZE` is 4067 bytes: the 4080-byte body capacity less the eight-byte
+heap metadata header and one five-byte slot entry. A tuple larger than this is
+rejected with `TUPLE_TOO_LARGE`; v1 has no overflow pages. This limit also
+ensures that any accepted tuple can fit on an otherwise empty data page.
+
 ## Other pages
 
-Pages 1 and above contain their common page header followed by 4080 bytes
-owned by the buffer pool. The disk manager stamps type `HEAP`, flags zero, and
-LSN zero unless a caller specifies metadata. B+ tree/catalog-specific body
-layouts remain owned by their higher layers and are not yet a portable
-interchange format.
+Pages 1 and above contain their common 16-byte physical page header followed
+by a 4080-byte body owned by the buffer pool. The buffer pool preserves the
+physical page type when reading, evicting, and flushing a page. B+ tree
+payload fields below are little-endian; key encodings are explicitly defined
+and do not use host structure padding.
+
+### B+ tree pages
+
+The common physical page header carries `BTREE_LEAF`, `BTREE_INTERNAL`, or
+`INDEX_META`; the payload starts at physical offset 16. These fixed body
+layouts are checked by `static_assert`s in `include/b_plus_tree.h`.
+
+| Page body offset | Width | Leaf field |
+|---:|---:|---|
+| 0 | 2 | Entry count |
+| 2 | 4 | Next leaf page ID (`-1` at the tail) |
+| 6 | variable | Sorted leaf entries |
+
+Each leaf entry is the encoded key followed by an 8-byte little-endian RID.
+The key width is the encoded key's size (16 bytes for `IndexKey16`); capacity
+is derived from the body size, not from compiler-dependent `std::pair` sizes.
+
+| Page body offset | Width | Internal field |
+|---:|---:|---|
+| 0 | 2 | Separator-key count |
+| 2 | variable | `count + 1` `(key, child_page_id)` slots |
+
+Slot zero contains the first child ID and has no meaningful key. Slots 1
+through `count` contain the separator for the slot's child followed by its
+child ID. A separator is the minimum key in its right child. Internal nodes
+have no parent pointer; the descent path is held by the operation.
+
+An `INDEX_META` body begins with exactly eight bytes:
+
+| Body offset | Width | Field |
+|---:|---:|---|
+| 0 | 4 | Root page ID (`-1` for empty) |
+| 4 | 2 | Tree height (`0` for empty) |
+| 6 | 2 | Key-kind enum |
+
+The database header's `catalog_root` points to the one SQL index's metadata
+page. Root and height updates use the metadata page's write guard. The SQL
+executor stores its table-heap header page ID in the metadata page's reserved
+bytes beginning at body offset 8. This is executor catalog wiring; it does not
+change the 8-byte B+ tree metadata layout.
+
+Non-root internal nodes have at least `ceil(max_children / 2) - 1`
+separators. Non-root leaves have at least ten percent of leaf capacity, rounded
+up; this permits the rightmost-insert split to leave the existing left leaf
+about 90% full. Monotone ascending insertion uses a 90/10 split; other
+insertion sequences use a 50/50 split. Deletion borrows before merging and
+collapses a one-child root. Retired nodes return to the allocator's free list.
+
+### Index key encodings
+
+`IndexKey16` is exactly 16 bytes and compares by unsigned `memcmp`:
+
+* Signed INT32/INT64 are sign-bit-flipped, then big-endian.
+* BOOLEAN is `00` or `01`, followed by zero bytes.
+* VARCHAR is at most 16 bytes, zero-padded; embedded NUL is rejected.
+* A composite key contains up to two independently sign-flipped INT32 fields,
+  each big-endian, followed by zero bytes.
+* A non-unique key is the 8-byte big-endian value followed by the 8-byte
+  big-endian RID. Both components are fixed-width, making every stored key
+  unique and preserving range order.
+
+Unique indexes use the key bytes directly and report `DUPLICATE_KEY`. B+ tree
+value fields are fixed-width 8-byte integers; the legacy SQL index stores a
+packed RID there. The executor stores each SQL row in `TableHeap` and indexes
+its packed RID; it does not keep SQL values in an in-memory-only side structure.
+
+RIDs contain a signed 32-bit page ID and unsigned 16-bit slot number. Their
+64-bit index representation stores the page ID in bits 16-47 and the slot in
+bits 0-15; bits 48-63 are reserved and must be zero.
 
 The WAL remains a separate prototype format and is not upgraded by this
 change. It does not participate in this page format's durability guarantees.

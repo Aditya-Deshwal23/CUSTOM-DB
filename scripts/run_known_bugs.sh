@@ -30,14 +30,18 @@ import xml.etree.ElementTree as ET
 
 xml_path, log_path, exit_status = sys.argv[1:]
 expected = [
-    "PersistenceTest.DISABLED_RestartKeepsData",
+    "PersistenceTest.RestartKeepsData",
+    "PersistenceTest.ExecutorIndexAndRowsSurviveCleanRestart",
     "DurabilityTest.DISABLED_HardKillKeepsAckedWrites",
-    "BPlusTreeTest.DISABLED_LookupsNeverFalseMissAfterManyInserts",
-    "BPlusTreeTest.DISABLED_RangeScanTerminatesAfterSplit",
+    "BPlusTreeTest.LookupsNeverFalseMissAfterManyInserts",
+    "BPlusTreeTest.RangeScanTerminatesAfterSplit",
+    "BPlusTreeFuzzTest.MillionOperationsAgainstMapWithConstantEviction",
+    "BPlusTreeTest.AscendingAndRandomFillFactorsBeatHalfFullBaseline",
+    "BPlusTreeTest.DescendingAndHotKeyChurnRemainValidAfterDeletes",
     "WalTest.DISABLED_RecordAppendedAfterTornTailIsRecoverable",
-    "ConcurrencyTest.DISABLED_ReaderWriterTsanClean",
+    "ConcurrencyTest.ExecutorStatementGateTsanClean",
     "SqlTest.DISABLED_DocumentedExamplesWork",
-    "MetricsTest.DISABLED_NoFabricatedValues",
+    "MetricsTest.NoFabricatedValues",
 ]
 
 results = {}
@@ -70,7 +74,7 @@ if "ThreadSanitizer: data race" in log:
         (line.strip() for line in log.splitlines() if line.startswith("SUMMARY: ThreadSanitizer:")),
         "ThreadSanitizer detected a data race",
     )
-    results["ConcurrencyTest.DISABLED_ReaderWriterTsanClean"] = ("FAIL", summary)
+    results["ConcurrencyTest.ExecutorStatementGateTsanClean"] = ("FAIL", summary)
 
 print("\nKnown regression results")
 print("| Test | Status | Detail |")

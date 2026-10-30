@@ -36,12 +36,33 @@ HTTP request check is not confused by unrelated concurrent requests. The
 `BufferPoolManager` or be destroyed on a different thread from the one that
 acquired its page latch.
 
-## Other lock interactions
+## Table heap
 
-`BPlusTree::root_latch_` serializes writers and protects root traversal.
-Read/write page guards protect page contents. The current B+ tree algorithms
-are still a prototype: scans, split behavior, root persistence, and
-transactional allocation are not certified.
+`TableHeap` uses page guards for every header/data-page access and retains at
+most one page guard in a `TableIterator`. Buffer-pool latches protect individual
+pages, but `TableHeap` does not serialize concurrent insert, update, delete, or
+reclaimed-page-set operations. Treat each heap as single-writer and do not
+concurrently mutate or scan it until table-level synchronization and TSan
+stress coverage are added.
+
+## B+ tree and statement gate
+
+The B+ tree itself does not provide tree-level synchronization or latch
+crabbing. Its caller must enforce the Phase 8 statement-gate contract: one
+writer at a time, or multiple readers with no concurrent writer. Operations
+retain only the current page guard except while adjusting a parent/sibling;
+the descent path stores page IDs and child indexes, not parent pointers.
+`Executor` implements the gate with a per-instance `std::shared_mutex`: INSERT
+takes the exclusive lock and SELECT/range reads take shared locks. The tree's
+page guards still protect individual page bodies and scans retain one leaf
+guard at a time. Direct B+ tree callers must provide the same gate themselves.
+
+This is not latch crabbing and does not permit a tree writer to run concurrently
+with readers. `TableHeap` has no independent concurrent-writer protocol; the
+executor gate also serializes its heap writes and guards heap reads against
+those writes.
+
+## Other lock interactions
 
 `FileDiskManager::header_mutex_` serializes page-zero metadata reads/writes and
 file extension. POSIX page reads and writes use positional I/O and do not take

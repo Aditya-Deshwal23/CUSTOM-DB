@@ -57,6 +57,11 @@ class PageGuard {
         return frame_->page_id;
     }
 
+    PageType GetPageType() const {
+        EnsureValid();
+        return frame_->page_type;
+    }
+
     frame_id_t GetFrameId() const {
         EnsureValid();
         return frame_id_;
@@ -89,6 +94,16 @@ class PageGuard {
             throw DbError(ErrorCode::INVALID_ARGUMENT, "Cannot dirty a read-guarded page",
                           frame_->page_id);
         }
+        dirty_on_release_ = true;
+    }
+
+    void SetPageType(PageType type) {
+        EnsureValid();
+        if (mode_ == GuardMode::READ) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT,
+                          "Cannot change the type of a read-guarded page", frame_->page_id);
+        }
+        frame_->page_type = type;
         dirty_on_release_ = true;
     }
 

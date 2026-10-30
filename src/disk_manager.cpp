@@ -398,6 +398,11 @@ void FileDiskManager::WriteExact(uint64_t offset, const char* buffer, size_t len
 }
 
 void FileDiskManager::ReadPage(page_id_t page_id, char* page_data) {
+    PageType ignored_type = PageType::HEAP;
+    ReadPage(page_id, page_data, ignored_type);
+}
+
+void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& type) {
     if (page_id < 0 || static_cast<uint64_t>(page_id) >= SizeInPages()) {
         throw DbError(ErrorCode::PAGE_OUT_OF_RANGE, "Page ID is outside the database file",
                       page_id);
@@ -414,6 +419,7 @@ void FileDiskManager::ReadPage(page_id_t page_id, char* page_data) {
     ReadExact(PageOffset(page_id), reinterpret_cast<char*>(image.data()), image.size(), page_id);
     if (std::all_of(image.begin(), image.end(), [](uint8_t value) { return value == 0; })) {
         std::memset(page_data, 0, PAGE_DATA_SIZE);
+        type = PageType::HEAP;
         return;
     }
 
@@ -423,6 +429,11 @@ void FileDiskManager::ReadPage(page_id_t page_id, char* page_data) {
         throw DbError(ErrorCode::PAGE_CHECKSUM_MISMATCH,
                       "Page CRC32C mismatch for page " + std::to_string(page_id), page_id);
     }
+    const uint16_t stored_type = GetU16(image.data() + 4);
+    if (stored_type > static_cast<uint16_t>(PageType::INDEX_META)) {
+        throw DbError(ErrorCode::PAGE_CORRUPT, "Unknown page type", page_id);
+    }
+    type = static_cast<PageType>(stored_type);
     std::memcpy(page_data, image.data() + PAGE_HEADER_SIZE, PAGE_DATA_SIZE);
 }
 

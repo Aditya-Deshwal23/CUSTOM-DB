@@ -10,10 +10,10 @@
 | SIGTERM stops the HTTP service gracefully | verified | `scripts/verify_resume_claims.sh`; `.github/workflows/ci.yml` runs the smoke check |
 | Both SIGINT and SIGTERM shutdown behavior are tested | in progress | `src/main.cpp` handles both signals; automated smoke currently sends SIGTERM only |
 | A Docker named volume retains the database file | verified | `docker-compose.yml` and the local Docker restart evidence in `docs/RESUME_EVIDENCE_REPORT.md` |
-| A Docker named volume restores API-inserted records after restart | removed | `tests/regression/known_bugs_test.cpp`: `PersistenceTest.DISABLED_RestartKeepsData`; the tree root is not restored |
+| A Docker named volume restores API-inserted records after restart | removed | A clean file-level executor restart is tested, but a Docker-volume restart is not part of CI |
 | The root Dockerfile is multi-stage and builds a single runtime service | verified | `Dockerfile`; `.github/workflows/ci.yml` Docker build |
 | Render deployment uses the repository Dockerfile | in progress | README deployment URL and root `Dockerfile`; no deployment health check is run in CI |
-| Disk-based persistence of API records survives graceful restart | removed | `PersistenceTest.DISABLED_RestartKeepsData` and `DurabilityTest.DISABLED_HardKillKeepsAckedWrites` |
+| Legacy executor index entries and heap rows survive a clean restart | verified | `PersistenceTest.ExecutorIndexAndRowsSurviveCleanRestart`; root metadata is reached through page-zero `catalog_root` |
 | Database pages are CRC32C-checksummed and corruption is detected | verified | `DiskManagerTest.DetectsSingleBitErrorsInSampledOrExhaustivePageBits` samples PR bits and `.github/workflows/nightly.yml` flips every bit; `DiskManagerTest.RoundTripReopenAndAllZeroPage` validates normal and empty-page reads |
 | `Sync()` performs an OS durability sync rather than a stream flush | verified | `src/disk_manager.cpp`; `scripts/verify_disk_syncs.sh` traces exactly the initialization and explicit sync calls; CI runs the trace on Linux |
 | New database files persist a versioned v2 little-endian header and parent-directory entry | verified | `DiskManagerTest.RoundTripReopenAndAllZeroPage`, `DiskManagerTest.RejectsInvalidMagicVersionAndPageSize`, and the Linux sync trace |
@@ -25,22 +25,30 @@
 | Buffer-pool exhaustion reports `BUFFER_POOL_EXHAUSTED`; stats and snapshots are 64-bit/observable | verified | `BufferPoolManagerTest.ThrowsTypedErrorWhenAllFramesArePinned`; `BufferPoolGuardTest`; `BUFFER_POOL_FRAMES` validation test |
 | Dirty write-back honors the policy hook and `FlushAll()` syncs the disk | verified | `BufferPoolManagerTest.FlushAllUsesPolicyAndSyncsAllowedPages`; `BufferPoolManagerTest.DirtyVictimIsWrittenBackBeforeReuse` |
 | Page allocation reuses a guard-managed free list persisted in page zero | verified | `PageAllocatorTest.DeletePageReturnsPageToGuardManagedFreeList`; `PageAllocatorTest.FreeListSurvivesReopening` |
+| Schema-validated INT/BIGINT/DOUBLE/BOOLEAN/VARCHAR values round-trip through an explicit-endian tuple format | verified | `StorageTupleTest.RandomSchemasRoundTripWithNullsAndEmptyStrings`; `StorageTupleTest.MaximumTupleAndOneByteOverAreChecked` |
+| Slotted pages represent empty rows, tombstones, in-place compaction, and update relocation without overflow pages | verified | `SlottedPageTest.FullPageOneByteAndZeroLengthTuples`; `SlottedPageTest.CompactionPreservesSlotsAndUpdatesInPlaceWhenPossible`; `TableHeapTest.PersistsRowsMovesUpdatesAndScans` |
+| TableHeap supports guarded insert/get/update/delete and full scans; RID values pack to 64 bits | verified | `TableHeapTest.PersistsRowsMovesUpdatesAndScans`; `RIDTest.PacksAndUnpacksPageAndSlot`; `StorageFuzzTest.MillionOperationsAgainstRidOracle` |
+| TableHeap rebuilds its reclaimed-page set lazily after reopen | verified | `TableHeapTest.RebuildsReclaimedPagesAfterReopen` |
+| TableHeap has measured million-row insert, full-scan, and point-get benchmarks | verified | `reldb_storage_benchmarks`; `docs/benchmarks.md` records the measured host and run |
 | Clock and LRU-K scan-resistance results are recorded | verified | `reldb_buffer_pool_benchmarks`; `docs/benchmarks.md` |
 | The B+ tree provides reliable lookups after 40,000 inserts with a 50-frame pool | verified | `BPlusTreeTest.LookupsNeverFalseMissAfterManyInserts`; 5,000 lookups, seed 1337 |
-| Range scans terminate and return all sorted results after splits | in progress | `BPlusTreeTest.DISABLED_RangeScanTerminatesAfterSplit`; known self-link defect is not fixed |
+| B+ tree insert/delete/get/range operations match an oracle under constant eviction | verified | `BPlusTreeFuzzTest.MillionOperationsAgainstMapWithConstantEviction`; 1,000 validations and pin checks every operation |
+| B+ tree split leaves preserve a complete sorted chain and satisfy occupancy rules | verified | `BPlusTreeTest.RangeScanTerminatesAfterSplit`; `BPlusTreeTest.AscendingAndRandomFillFactorsBeatHalfFullBaseline`; `docs/benchmarks.md` |
+| Range scans terminate and return all sorted results after splits | verified | `BPlusTreeTest.RangeScanTerminatesAfterSplit`; the Linux test retains its memory/time-limited child |
 | API data is recovered using the WAL on normal startup | removed | `src/main.cpp` does not invoke WAL recovery; no WAL-backed API write path |
 | The WAL can append records and recover after a torn tail | in progress | `WalTest.DISABLED_RecordAppendedAfterTornTailIsRecoverable` |
 | The WAL provides recovery or WAL-before-page durability | removed | WAL remains disconnected from normal API startup/write recovery; page persistence uses the separate `IDiskManager::Sync()` contract |
-| The whole database representation is portable across endianness and compiler ABI | removed | `docs/FILE_FORMAT.md`; only the file/page envelope is explicit little-endian; B+ tree payloads and WAL remain host-native |
+| The whole database representation is portable across endianness and compiler ABI | removed | The B+ tree payload is explicitly encoded, but the separate WAL prototype format remains host-native |
 | API query commands support integer `INSERT <key> <value>` and point `SELECT <key>` | verified | `scripts/verify_resume_claims.sh` exercises these commands |
-| The executor supports SQL tables or `SELECT * FROM Users` | removed | `SqlTest.DISABLED_DocumentedExamplesWork`; `src/executor.cpp` supports only integer commands |
-| The engine implements schema/catalog, transactions, update/delete, or a query planner | removed | `ARCHITECTURE.md`; no such route or executor behavior is present |
+| The executor supports arbitrary SQL tables or `SELECT * FROM Users` | removed | The executor supports only integer-key INSERT/SELECT; arbitrary SQL parsing/catalog queries are not implemented |
+| The engine implements general SQL, a catalog, transactions, or a query planner | removed | The API executor only supports integer `INSERT`/point `SELECT`; its persistent rows and index do not provide general SQL, a catalog, transactions, or a query planner |
+| TableHeap is safe for concurrent writers or readers | removed | `docs/CONCURRENCY.md`; no table-level synchronization or TSan stress test is provided |
 | Query parsing is zero-copy using `std::string_view` | removed | `src/executor.cpp` uses `std::string` token copies |
-| Writer operations use proven latch crabbing | removed | `ConcurrencyTest.DISABLED_ReaderWriterTsanClean`; `docs/CONCURRENCY.md` |
-| The engine is proven thread-safe under concurrent reads and writes | in progress | `ConcurrencyTest.DISABLED_ReaderWriterTsanClean` and the CI TSan job |
-| Metrics describe a real engine-wide workload | removed | API response labels its source `synthetic_workload`; counters represent only the separate seeded workload |
+| The B+ tree uses latch crabbing | removed | `docs/CONCURRENCY.md`; writers are serialized by the caller's statement gate |
+| Executor serializes writers and permits concurrent readers without data races | verified | `ConcurrencyTest.ExecutorStatementGateTsanClean`; `.github/workflows/ci.yml` TSan job |
+| Metrics describe a real engine-wide workload | removed | `/api/metrics` explicitly reports zero values with source `uninstrumented` until instrumentation is implemented |
 | The dashboard reports real active latch counts and disk-I/O latency | removed | `active_latches` and derived I/O latency are not exposed; dashboard simulation uses a persistent warning |
 | Dashboard schema and execution trace represent a live catalog/backend trace | removed | `README.md`; the simulation trace is explicitly illustrative |
-| The dashboard uses no random-number calls to fabricate metrics | verified | CI's `Check metrics honesty` step runs `MetricsTest.DISABLED_NoFabricatedValues`; `scripts/run_known_bugs.sh` reports it |
+| The dashboard uses no random-number calls to fabricate metrics | verified | CI's `Check metrics honesty` step runs `MetricsTest.NoFabricatedValues`; `scripts/run_known_bugs.sh` reports it |
 | A 10,000-record HTTP benchmark measured specific insert/read latency and throughput | in progress | `scripts/benchmark_api.py` and historical results in `docs/RESUME_EVIDENCE_REPORT.md`; not a CI performance gate |
 | The project is high-performance, production-grade, ACID, or fully durable | removed | No corresponding benchmark, transaction, recovery, or durability verification exists |

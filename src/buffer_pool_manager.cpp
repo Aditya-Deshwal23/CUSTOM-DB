@@ -114,6 +114,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
         page_id_t evicted_page_id = INVALID_PAGE_ID;
         bool evicted_dirty = false;
         uint64_t evicted_lsn = 0;
+        PageType evicted_type = PageType::HEAP;
         std::array<char, PAGE_DATA_SIZE> evicted_data{};
         bool claimed_free_page = false;
         std::shared_ptr<WriteBackPolicy> policy;
@@ -121,11 +122,13 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
             std::unique_lock<std::mutex> lock(pool_mutex_);
             const auto write_back = in_flight_write_backs_.find(page_id);
             if (write_back != in_flight_write_backs_.end()) {
-                Frame& pending = frames_[static_cast<size_t>(write_back->second)];
+                const frame_id_t pending_frame_id = write_back->second;
+                Frame& pending = frames_[static_cast<size_t>(pending_frame_id)];
                 waits_.fetch_add(1, std::memory_order_relaxed);
                 pending.condition.wait(lock, [&]() {
-                    return in_flight_write_backs_.find(page_id) ==
-                           in_flight_write_backs_.end();
+                    const auto current = in_flight_write_backs_.find(page_id);
+                    return current == in_flight_write_backs_.end() ||
+                           current->second != pending_frame_id;
                 });
                 continue;
             }
@@ -147,6 +150,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                     frame->condition.wait(lock, [&]() {
                         const auto mapping = page_table_.find(page_id);
                         return mapping == page_table_.end() ||
+                               mapping->second != frame_id ||
                                frames_[static_cast<size_t>(mapping->second)].io_state ==
                                    IoState::READY;
                     });
@@ -188,6 +192,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
             evicted_dirty = evicted_page_id != INVALID_PAGE_ID &&
                             frame->dirty.load(std::memory_order_acquire);
             evicted_lsn = frame->lsn;
+            evicted_type = frame->page_type;
             if (evicted_page_id != INVALID_PAGE_ID) {
                 std::copy(frame->data.begin(), frame->data.end(), evicted_data.begin());
                 page_table_.erase(evicted_page_id);
@@ -218,7 +223,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                 if (evicted_page_id == 0) {
                     disk_manager_->WriteHeaderPage(frame->data.data());
                 } else {
-                    disk_manager_->WritePage(evicted_page_id, frame->data.data());
+                    disk_manager_->WritePage(evicted_page_id, frame->data.data(), evicted_type);
                 }
                 write_back_completed = true;
                 dirty_write_backs_.fetch_add(1, std::memory_order_relaxed);
@@ -226,7 +231,9 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                 std::lock_guard<std::mutex> lock(pool_mutex_);
                 frame->io_state = IoState::LOADING;
             }
-            disk_manager_->ReadPage(page_id, frame->data.data());
+            PageType loaded_type = PageType::HEAP;
+            disk_manager_->ReadPage(page_id, frame->data.data(), loaded_type);
+            frame->page_type = loaded_type;
             frame->lsn = 0;
             if (mode == GuardMode::READ) {
                 frame->rwlatch.lock_shared();
@@ -264,6 +271,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
             }
             frame->pin_count.store(0, std::memory_order_release);
             frame->page_id = evicted_page_id;
+            frame->page_type = evicted_type;
             frame->io_state = IoState::READY;
             if (evicted_page_id == INVALID_PAGE_ID) {
                 frame->dirty.store(false, std::memory_order_release);
@@ -320,7 +328,7 @@ bool BufferPoolManager::RetirePage(WritePageGuard& guard) {
             return false;
         }
         policy->BeforeWriteBack(page_id, frame->lsn);
-        disk_manager_->WritePage(page_id, frame->data.data());
+        disk_manager_->WritePage(page_id, frame->data.data(), frame->page_type);
     } catch (...) {
         std::lock_guard<std::mutex> lock(pool_mutex_);
         free_pages_.erase(page_id);
@@ -417,7 +425,7 @@ void BufferPoolManager::FlushFrame(Frame* frame) {
     if (page_id == 0) {
         disk_manager_->WriteHeaderPage(frame->data.data());
     } else {
-        disk_manager_->WritePage(page_id, frame->data.data());
+        disk_manager_->WritePage(page_id, frame->data.data(), frame->page_type);
     }
     frame->dirty.store(false, std::memory_order_release);
     dirty_write_backs_.fetch_add(1, std::memory_order_relaxed);

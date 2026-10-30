@@ -1,5 +1,7 @@
 # Resume Evidence Report
 
+> Historical audit snapshot. Its implementation findings describe the code as audited then and are superseded by current evidence in [CLAIMS.md](./CLAIMS.md) and the regression suite.
+
 ## Scope and Environment
 
 This report audits the working code and live Docker image as of 2026-07-13. It does not treat README claims, comments, or unused classes as implemented behavior.

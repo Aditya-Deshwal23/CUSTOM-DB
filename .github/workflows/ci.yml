@@ -31,7 +31,7 @@ jobs:
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         run: scripts/verify_disk_syncs.sh build/reldb_disk_sync_probe
       - name: Check metrics honesty
-        run: build/reldb_regression_tests --gtest_also_run_disabled_tests --gtest_filter=MetricsTest.DISABLED_NoFabricatedValues
+        run: build/reldb_regression_tests --gtest_filter=MetricsTest.NoFabricatedValues
       - name: Verify HTTP examples and shutdown
         run: scripts/verify_resume_claims.sh
       - name: Print known-bug table
@@ -80,11 +80,9 @@ jobs:
         run: sudo sysctl vm.mmap_rnd_bits=28
       - name: Run disk manager TSan stress
         run: build-tsan/reldb_regression_tests --gtest_filter=DiskManagerTest.ConcurrentDistinctPageIo
-      - name: Run TSan regression
+      - name: Run statement-gate TSan stress
         shell: bash
-        run: |
-          GTEST_FILTER='ConcurrencyTest.DISABLED_ReaderWriterTsanClean' scripts/run_known_bugs.sh build-tsan/reldb_regression_tests | tee tsan.log
-          grep -q 'ThreadSanitizer: data race' tsan.log
+        run: build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.ExecutorStatementGateTsanClean | tee tsan.log
       - name: Upload TSan log on failure
         if: failure()
         uses: actions/upload-artifact@v4

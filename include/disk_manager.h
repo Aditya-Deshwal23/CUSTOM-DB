@@ -52,6 +52,10 @@ class IDiskManager {
     virtual ~IDiskManager() = default;
 
     virtual void ReadPage(page_id_t page_id, char* page_data) = 0;
+    virtual void ReadPage(page_id_t page_id, char* page_data, PageType& type) {
+        ReadPage(page_id, page_data);
+        type = PageType::HEAP;
+    }
     virtual void WritePage(page_id_t page_id, const char* page_data, PageType type = PageType::HEAP,
                            uint16_t flags = 0, uint64_t lsn = 0) = 0;
     virtual void WriteHeaderPage(const char* page_data) = 0;
@@ -71,6 +75,7 @@ class FileDiskManager final : public IDiskManager {
 
     void Open();
     void ReadPage(page_id_t page_id, char* page_data) override;
+    void ReadPage(page_id_t page_id, char* page_data, PageType& type) override;
     void WritePage(page_id_t page_id, const char* page_data, PageType type = PageType::HEAP,
                    uint16_t flags = 0, uint64_t lsn = 0) override;
     void WriteHeaderPage(const char* page_data) override;

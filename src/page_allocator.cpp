@@ -99,6 +99,7 @@ WritePageGuard PageAllocator::NewPage() {
         WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(next_free));
         auto* body = free_page.AsMut<std::array<char, PAGE_DATA_SIZE>>();
         body->fill(0);
+        free_page.SetPageType(PageType::HEAP);
         return free_page;
     }
 
@@ -129,15 +130,19 @@ bool PageAllocator::DeletePage(page_id_t page_id) {
     auto* header = header_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
     auto* body = page_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
     const std::array<char, PAGE_DATA_SIZE> original_body = *page_guard.As<std::array<char, PAGE_DATA_SIZE>>();
+    const PageType original_type = page_guard.GetPageType();
     const uint32_t old_head = ReadU32(header->data() + kFreeListHeadOffset);
     WriteU32(body->data(), old_head);
+    page_guard.SetPageType(PageType::FREE);
     try {
         if (!buffer_pool_.RetirePage(page_guard)) {
             *body = original_body;
+            page_guard.SetPageType(original_type);
             return false;
         }
     } catch (...) {
         *body = original_body;
+        page_guard.SetPageType(original_type);
         throw;
     }
     WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(page_id));

@@ -7,21 +7,21 @@ CUSTOM-DB is a C++17 storage-engine prototype with a Crow HTTP service and a van
 ### Implemented
 
 - `GET /health`, `GET /api/metrics`, and `POST /api/query` are served by Crow.
-- The query API supports session-scoped integer commands: `INSERT <key> <value>` and `SELECT <key>`.
+- The query API supports integer commands: `INSERT <key> <value>` and `SELECT <key>`. The executor stores rows in `TableHeap` and indexes packed RIDs in a persistent B+ tree.
 - The service reads `PORT` and `DB_PATH`, serves the dashboard from the same origin, and handles SIGINT/SIGTERM shutdown.
 - The root Dockerfile builds a single service image. Docker Compose mounts a named volume at `/data`.
 
 ### Prototype
 
-- Disk pages, a buffer pool, a clock replacer, a B+ tree, a query executor, and a WAL implementation exist in the source tree. The API's B+ tree root is not persisted, and the WAL is not connected to the normal write path.
-- `/api/metrics` reports observations from a seeded synthetic workload. It is not authoritative engine-wide telemetry.
+- Disk pages, a buffer pool, a clock replacer, a B+ tree, a query executor, and a WAL implementation exist in the source tree. The one SQL index root is persisted in an `INDEX_META` page reached through `header.catalog_root`; WAL is not connected to the normal write path.
+- `/api/metrics` returns zeros with `source: "uninstrumented"` until Phase 10 instrumentation is implemented.
 - The dashboard's schema visualization and simulation trace are illustrative. Simulation mode shows a persistent warning; the trace is not a report of backend operations.
-- Database files use a v2 little-endian checksummed page envelope; B+ tree payloads and WAL records remain host-native prototypes. Page writes require an explicit `Sync()` for an OS durability barrier.
+- Database files use a v2 little-endian checksummed page envelope, and B+ tree key/value/page fields use explicit encodings. WAL records remain a separate prototype format. Page writes require an explicit `Sync()` for an OS durability barrier.
 
 ### Not implemented
 
-- SQL tables, schemas, general SQL syntax, transactions, crash recovery, durable API records, or SQL statements such as `SELECT * FROM Users`.
-- Durable database persistence across process restarts. A mounted volume retains the file, but the B+ tree root is not restored.
+- General SQL syntax, transactions, crash recovery, crash-safe page allocation, or SQL statements such as `SELECT * FROM Users`.
+- Automatic OS durability for each acknowledged API write. Clean shutdown/reopen restores index entries and rows, but a crash-safe WAL/recovery path is not implemented.
 - WAL-backed durability, automatic durability for every page write, zero-copy query parsing, or writer latch crabbing.
 - Production-grade concurrency, performance, or durability guarantees.
 
@@ -32,10 +32,10 @@ The disk format is documented in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md), and
 
 - `/`: dashboard
 - `/health`: health check
-- `/api/metrics`: synthetic-workload metrics
+- `/api/metrics`: currently uninstrumented metrics (zero values)
 - `/api/query`: integer insert/select API
 
-The current Render demo is [custom-db-engine.onrender.com](https://custom-db-engine.onrender.com). Render availability and filesystem persistence depend on the configured service and plan; the service does not restore API records after restart.
+The current Render demo is [custom-db-engine.onrender.com](https://custom-db-engine.onrender.com). Render availability and filesystem persistence depend on the configured service and plan.
 
 ## Build and run
 
@@ -51,4 +51,4 @@ The dashboard console accepts `INSERT 42 100` and then `SELECT 42`. SQL examples
 
 ## Verification
 
-CI builds GCC and Clang Debug/Release configurations, runs CTest, builds ASan+UBSan and TSan configurations, checks changed C++ formatting, lints the Dockerfile, and builds the image without pushing it. `scripts/run_known_bugs.sh` runs the disabled regression cases and prints their current results.
+CI builds GCC and Clang Debug/Release configurations, runs CTest, builds ASan+UBSan and TSan configurations, checks changed C++ formatting, lints the Dockerfile, and builds the image without pushing it. The B+ tree oracle regression covers one million operations with a 16-frame pool; see [docs/CLAIMS.md](docs/CLAIMS.md) for evidence.

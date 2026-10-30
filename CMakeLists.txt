@@ -69,6 +69,8 @@ add_library(reldb_core STATIC
   src/clock_replacer.cpp
   src/page_allocator.cpp
   src/buffer_pool_manager.cpp
+  src/storage/tuple.cpp
+  src/storage/table_heap.cpp
   src/b_plus_tree.cpp
   src/executor.cpp
   src/wal.cpp
@@ -115,9 +117,11 @@ endfunction()
 if(RELDB_BUILD_TESTS)
   enable_testing()
   add_executable(reldb_regression_tests
+    tests/b_plus_tree_test.cpp
     tests/regression/known_bugs_test.cpp
     tests/disk_manager_test.cpp
     tests/buffer_pool_test.cpp
+    tests/storage_test.cpp
   )
   target_compile_definitions(reldb_regression_tests PRIVATE
     RELDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -140,6 +144,8 @@ if(RELDB_BUILD_BENCHMARKS)
   target_link_libraries(reldb_disk_benchmarks PRIVATE reldb_core benchmark::benchmark)
   add_executable(reldb_buffer_pool_benchmarks bench/bench_buffer_pool.cpp)
   target_link_libraries(reldb_buffer_pool_benchmarks PRIVATE reldb_core benchmark::benchmark)
+  add_executable(reldb_storage_benchmarks bench/storage_bench.cpp)
+  target_link_libraries(reldb_storage_benchmarks PRIVATE reldb_core benchmark::benchmark)
 endif()
 
 set(project_targets reldb_core relational_db)
@@ -148,7 +154,8 @@ if(RELDB_BUILD_TESTS)
   list(APPEND project_targets reldb_disk_sync_probe)
 endif()
 if(RELDB_BUILD_BENCHMARKS)
-  list(APPEND project_targets reldb_benchmarks reldb_disk_benchmarks reldb_buffer_pool_benchmarks)
+  list(APPEND project_targets reldb_benchmarks reldb_disk_benchmarks reldb_buffer_pool_benchmarks
+       reldb_storage_benchmarks)
 endif()
 foreach(target IN LISTS project_targets)
   reldb_configure_project_target(${target})

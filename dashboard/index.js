@@ -313,7 +313,11 @@ async function updateTelemetry() {
         throw new Error(`HTTP error! status: ${response.status}`);
     }
     const data = await response.json();
-    if (data.source !== 'synthetic_workload') {
+    if (data.source === 'uninstrumented') {
+        runTelemetrySimulation();
+        return;
+    }
+    if (data.source !== 'engine') {
         throw new Error('Metrics response has an unknown source.');
     }
 

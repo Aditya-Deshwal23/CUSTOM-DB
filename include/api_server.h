@@ -2,7 +2,6 @@
 #define API_SERVER_H
 
 #include <array>
-#include <atomic>
 #include <cstdio>
 #include <future>
 #include <memory>
@@ -30,12 +29,6 @@ public:
      auto& cors = app_.get_middleware<crow::CORSHandler>();
      cors.global().origin("*").methods(crow::HTTPMethod::GET, crow::HTTPMethod::POST);
  }
-
-    void SetMetrics(int query_rate, int avg_latency, int error_count) {
-        query_rate_ = query_rate;
-        avg_latency_ = avg_latency;
-        error_count_ = error_count;
-    }
 
     void Run(int port = 8080) {
         CROW_ROUTE(app_, "/")
@@ -96,11 +89,11 @@ public:
         CROW_ROUTE(app_, "/api/metrics")
         ([this]() {
             crow::json::wvalue x;
-            x["cache_hit_rate"] = cache_hit_rate_.load();
-            x["query_throughput"] = query_rate_.load();
-            x["avg_latency"] = avg_latency_.load();
-            x["error_count"] = error_count_.load();
-            x["source"] = "synthetic_workload";
+            x["cache_hit_rate"] = 0;
+            x["query_throughput"] = 0;
+            x["avg_latency"] = 0;
+            x["error_count"] = 0;
+            x["source"] = "uninstrumented";
             CheckForLeakedPins();
             return crow::response(x);
         });
@@ -114,20 +107,28 @@ public:
             }
             std::string query = x["query"].s();
             
-            // Execute query via engine
-            std::string result = executor_->ExecuteQuery(query);
-            CheckForLeakedPins();
-            
-            crow::json::wvalue res;
-            res["status"] = "success";
-            res["result"] = result;
-            return crow::response(res);
+            try {
+                std::string result = executor_->ExecuteQuery(query);
+                CheckForLeakedPins();
+
+                crow::json::wvalue res;
+                res["status"] = "success";
+                res["result"] = result;
+                return crow::response(res);
+            } catch (const DbError& error) {
+                CheckForLeakedPins();
+                crow::json::wvalue res;
+                res["status"] = "error";
+                res["code"] = error.Code() == ErrorCode::DUPLICATE_KEY ? "DUPLICATE_KEY"
+                                                                        : "DATABASE_ERROR";
+                res["message"] = error.what();
+                return crow::response(error.Code() == ErrorCode::DUPLICATE_KEY ? 409 : 500, res);
+            }
         });
 
         app_.bindaddr("0.0.0.0").port(port).multithreaded().run();
     }
 
-    void SetCacheHitRate(int rate) { cache_hit_rate_ = rate; }
     void Stop() { app_.stop(); }
 
 private:
@@ -165,10 +166,6 @@ private:
     crow::App<crow::CORSHandler> app_;
     std::string dashboard_path_;
 
-    std::atomic<int> cache_hit_rate_{0};
-    std::atomic<int> query_rate_{0};
-    std::atomic<int> avg_latency_{0};
-    std::atomic<int> error_count_{0};
 };
 
 } // namespace relational_db

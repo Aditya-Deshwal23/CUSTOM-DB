@@ -37,7 +37,11 @@ grep -q '"pinned_frames"' <<<"$buffer_pool"
 grep -q '"frames"' <<<"$buffer_pool"
 metrics="$(curl --silent --fail "http://127.0.0.1:$port/api/metrics")"
 grep -q '"query_throughput"' <<<"$metrics"
-grep -q '"source":"synthetic_workload"' <<<"$metrics"
+grep -q '"source":"uninstrumented"' <<<"$metrics"
+grep -q '"cache_hit_rate":0' <<<"$metrics"
+grep -q '"query_throughput":0' <<<"$metrics"
+grep -q '"avg_latency":0' <<<"$metrics"
+grep -q '"error_count":0' <<<"$metrics"
 if grep -q '"active_latches"' <<<"$metrics"; then
     echo 'Unexpected fabricated active_latches metric in /api/metrics.' >&2
     exit 1
@@ -51,7 +55,11 @@ query() {
 
 query 'INSERT 42 100' | grep -q 'Inserted (42, 100)'
 query 'SELECT 42' | grep -q 'Result: 100'
-query 'INSERT 42 100' | grep -q 'already exists'
+duplicate_response="$(curl --silent --write-out $'\n%{http_code}' \
+    --request POST "http://127.0.0.1:$port/api/query" \
+    --header 'Content-Type: application/json' --data '{"query":"INSERT 42 100"}')"
+grep -q '"code":"DUPLICATE_KEY"' <<<"$duplicate_response"
+grep -q '409$' <<<"$duplicate_response"
 query 'SELECT 999' | grep -q 'not found'
 
 if [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST \
