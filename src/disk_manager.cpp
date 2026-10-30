@@ -9,6 +9,7 @@
 
 #include "crc32c.h"
 #include "db_error.h"
+#include "wal.h"
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -131,7 +132,8 @@ void SyncParentDirectory(const std::string& path) {
 
 }  // namespace
 
-FileDiskManager::FileDiskManager(const std::string& db_file) : file_name_(db_file) {
+FileDiskManager::FileDiskManager(const std::string& db_file, bool allow_wal_recovery)
+    : file_name_(db_file), allow_wal_recovery_(allow_wal_recovery) {
     Open();
 }
 
@@ -190,7 +192,30 @@ void FileDiskManager::Open() {
 #endif
             Sync();
         } else {
-            ValidateExistingFile();
+            try {
+                ValidateExistingFile();
+            } catch (const DbError& error) {
+                if (!allow_wal_recovery_ ||
+                    (error.Code() != ErrorCode::INVALID_DB_FILE &&
+                     error.Code() != ErrorCode::HEADER_CORRUPT &&
+                     error.Code() != ErrorCode::PAGE_CHECKSUM_MISMATCH)) {
+                    throw;
+                }
+#ifdef _WIN32
+                const __int64 size = _filelengthi64(file_descriptor_);
+                const uint64_t existing_size = size < 0 ? 0 : static_cast<uint64_t>(size);
+#else
+                struct stat status {};
+                if (fstat(file_descriptor_, &status) != 0) {
+                    throw DbError(ErrorCode::IO_ERROR, IoErrorMessage("stat database file"));
+                }
+                const uint64_t existing_size = static_cast<uint64_t>(status.st_size);
+#endif
+                if (existing_size < PAGE_SIZE || existing_size % PAGE_SIZE != 0) {
+                    throw;
+                }
+                page_count_.store(existing_size / PAGE_SIZE, std::memory_order_release);
+            }
         }
         opened_.store(true, std::memory_order_release);
     } catch (...) {
@@ -202,6 +227,10 @@ void FileDiskManager::Open() {
         file_descriptor_ = -1;
         throw;
     }
+}
+
+void FileDiskManager::ValidateHeader() {
+    ValidateExistingFile();
 }
 
 void FileDiskManager::InitializeNewFile() {
@@ -403,6 +432,13 @@ void FileDiskManager::ReadPage(page_id_t page_id, char* page_data) {
 }
 
 void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& type) {
+    uint16_t flags = 0;
+    uint64_t lsn = 0;
+    ReadPage(page_id, page_data, type, flags, lsn);
+}
+
+void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& type,
+                               uint16_t& flags, uint64_t& lsn) {
     if (page_id < 0 || static_cast<uint64_t>(page_id) >= SizeInPages()) {
         throw DbError(ErrorCode::PAGE_OUT_OF_RANGE, "Page ID is outside the database file",
                       page_id);
@@ -420,6 +456,8 @@ void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& typ
     if (std::all_of(image.begin(), image.end(), [](uint8_t value) { return value == 0; })) {
         std::memset(page_data, 0, PAGE_DATA_SIZE);
         type = PageType::HEAP;
+        flags = 0;
+        lsn = 0;
         return;
     }
 
@@ -434,6 +472,8 @@ void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& typ
         throw DbError(ErrorCode::PAGE_CORRUPT, "Unknown page type", page_id);
     }
     type = static_cast<PageType>(stored_type);
+    flags = GetU16(image.data() + 6);
+    lsn = GetU64(image.data() + 8);
     std::memcpy(page_data, image.data() + PAGE_HEADER_SIZE, PAGE_DATA_SIZE);
 }
 
@@ -457,10 +497,20 @@ void FileDiskManager::WritePage(page_id_t page_id, const char* page_data, PageTy
     PutU64(image.data() + 8, lsn);
     std::memcpy(image.data() + PAGE_HEADER_SIZE, page_data, PAGE_DATA_SIZE);
     PutU32(image.data(), Crc32c(image.data() + 4, PAGE_SIZE - 4));
+    if (FailPoint::IsConfigured("writeback_mid", "kill") ||
+        FailPoint::IsConfigured("writeback_mid", "exit") ||
+        FailPoint::IsConfigured("writeback_mid", "throw")) {
+        WriteExact(PageOffset(page_id), reinterpret_cast<const char*>(image.data()), PAGE_SIZE / 2U);
+        FailPoint::Hit("writeback_mid");
+    }
     WriteExact(PageOffset(page_id), reinterpret_cast<const char*>(image.data()), image.size());
 }
 
 void FileDiskManager::WriteHeaderPage(const char* page_data) {
+    WriteHeaderPage(page_data, 0, 0);
+}
+
+void FileDiskManager::WriteHeaderPage(const char* page_data, uint16_t flags, uint64_t lsn) {
     if (page_data == nullptr) {
         throw DbError(ErrorCode::INVALID_ARGUMENT, "WriteHeaderPage requires a non-null input");
     }
@@ -468,12 +518,52 @@ void FileDiskManager::WriteHeaderPage(const char* page_data) {
     std::lock_guard<std::mutex> lock(header_mutex_);
     std::array<uint8_t, PAGE_SIZE> image{};
     ReadExact(0, reinterpret_cast<char*>(image.data()), image.size(), 0);
+    PutU16(image.data() + 6, flags);
+    PutU64(image.data() + 8, lsn);
     std::memcpy(image.data() + PAGE_HEADER_SIZE, page_data, PAGE_DATA_SIZE);
     PutU32(image.data() + kHeaderCrcOffset,
            Crc32c(image.data() + kMagicOffset, kHeaderCrcOffset - kMagicOffset));
     PutU32(image.data(), Crc32c(image.data() + 4, PAGE_SIZE - 4));
+    if (FailPoint::IsConfigured("writeback_mid", "kill") ||
+        FailPoint::IsConfigured("writeback_mid", "exit") ||
+        FailPoint::IsConfigured("writeback_mid", "throw")) {
+        WriteExact(0, reinterpret_cast<const char*>(image.data()), PAGE_SIZE / 2U);
+        FailPoint::Hit("writeback_mid");
+    }
     WriteExact(0, reinterpret_cast<const char*>(image.data()), image.size());
     page_count_.store(GetU64(image.data() + kPageCountOffset), std::memory_order_release);
+}
+
+void FileDiskManager::WritePageImage(page_id_t page_id, const uint8_t* image) {
+    if (page_id < 0 || image == nullptr) {
+        throw DbError(ErrorCode::INVALID_ARGUMENT, "Invalid raw page image", page_id);
+    }
+    if (GetU32(image) != Crc32c(image + 4, PAGE_SIZE - 4)) {
+        throw DbError(ErrorCode::PAGE_CHECKSUM_MISMATCH,
+                      "WAL page image has an invalid page checksum", page_id);
+    }
+    const uint16_t type = GetU16(image + 4);
+    if (type > static_cast<uint16_t>(PageType::INDEX_META)) {
+        throw DbError(ErrorCode::PAGE_CORRUPT, "WAL page image has an unknown page type", page_id);
+    }
+    if (page_id == 0) {
+        const uint32_t header_crc = GetU32(image + kHeaderCrcOffset);
+        if (header_crc != Crc32c(image + kMagicOffset, kHeaderCrcOffset - kMagicOffset)) {
+            throw DbError(ErrorCode::HEADER_CORRUPT, "WAL page-zero image has invalid header CRC");
+        }
+    }
+
+    std::lock_guard<std::mutex> header_lock(header_mutex_);
+    const uint64_t required_pages = static_cast<uint64_t>(page_id) + 1U;
+    if (required_pages > page_count_.load(std::memory_order_relaxed)) {
+        GrowPhysicalFile(required_pages);
+    }
+    WriteExact(PageOffset(page_id), reinterpret_cast<const char*>(image), PAGE_SIZE);
+    if (page_id == 0) {
+        page_count_.store(GetU64(image + kPageCountOffset), std::memory_order_release);
+    } else if (required_pages > page_count_.load(std::memory_order_relaxed)) {
+        page_count_.store(required_pages, std::memory_order_release);
+    }
 }
 
 void FileDiskManager::Sync() {
@@ -514,6 +604,7 @@ void FileDiskManager::Extend(uint64_t page_count) {
     }
     const uint64_t updated = current + page_count;
     GrowPhysicalFile(updated);
+    page_count_.store(updated, std::memory_order_release);
     std::array<uint8_t, PAGE_SIZE> image{};
     ReadExact(0, reinterpret_cast<char*>(image.data()), image.size(), 0);
     PutU64(image.data() + kPageCountOffset, updated);
@@ -521,7 +612,51 @@ void FileDiskManager::Extend(uint64_t page_count) {
            Crc32c(image.data() + kMagicOffset, kHeaderCrcOffset - kMagicOffset));
     PutU32(image.data(), Crc32c(image.data() + 4, PAGE_SIZE - 4));
     WriteExact(0, reinterpret_cast<const char*>(image.data()), image.size());
+}
+
+void FileDiskManager::ReservePages(uint64_t page_count) {
+    if (page_count == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(header_mutex_);
+    const uint64_t current = page_count_.load(std::memory_order_relaxed);
+    const uint64_t maximum = static_cast<uint64_t>(std::numeric_limits<page_id_t>::max()) + 1U;
+    if (page_count > maximum - current) {
+        throw DbError(ErrorCode::IO_ERROR, "Requested database page count exceeds page IDs");
+    }
+    const uint64_t updated = current + page_count;
+    GrowPhysicalFile(updated);
     page_count_.store(updated, std::memory_order_release);
+}
+
+void FileDiskManager::RestorePageCount(uint64_t page_count) noexcept {
+    page_count_.store(page_count, std::memory_order_release);
+}
+
+void IDiskManager::WritePageImage(page_id_t page_id, const uint8_t* image) {
+    if (page_id < 0 || image == nullptr) {
+        throw DbError(ErrorCode::INVALID_ARGUMENT, "Invalid raw page image", page_id);
+    }
+    const auto get_u16 = [](const uint8_t* bytes) {
+        return static_cast<uint16_t>(bytes[0]) |
+               static_cast<uint16_t>(static_cast<uint16_t>(bytes[1]) << 8U);
+    };
+    const auto get_u64 = [](const uint8_t* bytes) {
+        uint64_t value = 0;
+        for (size_t index = 0; index < 8; ++index) {
+            value |= static_cast<uint64_t>(bytes[index]) << (index * 8U);
+        }
+        return value;
+    };
+    const PageType type = static_cast<PageType>(get_u16(image + 4));
+    const uint16_t flags = get_u16(image + 6);
+    const uint64_t lsn = get_u64(image + 8);
+    const char* body = reinterpret_cast<const char*>(image + PAGE_HEADER_SIZE);
+    if (page_id == 0) {
+        WriteHeaderPage(body, flags, lsn);
+    } else {
+        WritePage(page_id, body, type, flags, lsn);
+    }
 }
 
 DiskStats FileDiskManager::Stats() const {

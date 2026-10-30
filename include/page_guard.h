@@ -18,15 +18,17 @@ class PageGuard {
 
    public:
     using ReleaseFunction = void (*)(void*, Frame*, bool, std::thread::id) noexcept;
+    using MutationFunction = void (*)(void*, Frame*);
 
     PageGuard() = default;
     PageGuard(Frame* frame, frame_id_t frame_id, void* owner, ReleaseFunction release,
-              GuardMode mode)
+              GuardMode mode, MutationFunction mutation = nullptr)
         : frame_(frame),
           frame_id_(frame_id),
           owner_(owner),
           release_(release),
           mode_(mode),
+          mutation_(mutation),
           origin_thread_(std::this_thread::get_id()) {}
 
     PageGuard(PageGuard&& other) noexcept {
@@ -84,6 +86,7 @@ class PageGuard {
                           frame_->page_id);
         }
         CheckAlignment<T>();
+        RegisterMutation();
         dirty_on_release_ = true;
         return reinterpret_cast<T*>(frame_->data.data());
     }
@@ -103,6 +106,7 @@ class PageGuard {
             throw DbError(ErrorCode::INVALID_ARGUMENT,
                           "Cannot change the type of a read-guarded page", frame_->page_id);
         }
+        RegisterMutation();
         frame_->page_type = type;
         dirty_on_release_ = true;
     }
@@ -125,6 +129,7 @@ class PageGuard {
         frame_id_ = -1;
         owner_ = nullptr;
         release_ = nullptr;
+        mutation_ = nullptr;
         dirty_on_release_ = false;
         if (mode == GuardMode::READ) {
             frame->rwlatch.unlock_shared();
@@ -156,18 +161,26 @@ class PageGuard {
         }
     }
 
+    void RegisterMutation() {
+        if (mutation_ != nullptr) {
+            mutation_(owner_, frame_);
+        }
+    }
+
     void MoveFrom(PageGuard&& other) noexcept {
         frame_ = other.frame_;
         frame_id_ = other.frame_id_;
         owner_ = other.owner_;
         release_ = other.release_;
         mode_ = other.mode_;
+        mutation_ = other.mutation_;
         dirty_on_release_ = other.dirty_on_release_;
         origin_thread_ = other.origin_thread_;
         other.frame_ = nullptr;
         other.frame_id_ = -1;
         other.owner_ = nullptr;
         other.release_ = nullptr;
+        other.mutation_ = nullptr;
         other.dirty_on_release_ = false;
     }
 
@@ -184,6 +197,7 @@ class PageGuard {
         frame_id_ = -1;
         owner_ = nullptr;
         release_ = nullptr;
+        mutation_ = nullptr;
         dirty_on_release_ = false;
     }
 
@@ -192,6 +206,7 @@ class PageGuard {
     void* owner_{nullptr};
     ReleaseFunction release_{nullptr};
     GuardMode mode_{GuardMode::BASIC};
+    MutationFunction mutation_{nullptr};
     bool dirty_on_release_{false};
     std::thread::id origin_thread_{};
 };

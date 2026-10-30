@@ -6,6 +6,17 @@ on:
   workflow_dispatch:
 
 jobs:
+  crash-safety:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRELDB_WERROR=ON
+      - name: Build regression tests
+        run: cmake --build build --parallel --target reldb_regression_tests
+      - name: Run 5,000 seeded hard-kill iterations
+        run: tools/crashtest build/reldb_regression_tests 5000
+
   exhaustive-page-checksum:
     runs-on: ubuntu-24.04
     steps:

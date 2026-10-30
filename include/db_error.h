@@ -20,6 +20,7 @@ enum class ErrorCode {
     INVALID_TUPLE,
     TUPLE_TOO_LARGE,
     DUPLICATE_KEY,
+    TXN_TOO_LARGE,
     IO_ERROR
 };
 

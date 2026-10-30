@@ -48,10 +48,9 @@ struct KeyCodec<Key, typename std::enable_if<std::is_integral<Key>::value>::type
         }
         if constexpr (std::is_signed<Key>::value) {
             ordered ^= Unsigned{1} << (kSize * 8U - 1U);
-            if (ordered > static_cast<Unsigned>(std::numeric_limits<Key>::max())) {
-                return static_cast<Key>(
-                    -1 - static_cast<Key>(static_cast<Unsigned>(~ordered)));
-            }
+            Key value{};
+            std::memcpy(&value, &ordered, sizeof(value));
+            return value;
         }
         return static_cast<Key>(ordered);
     }

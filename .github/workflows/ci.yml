@@ -83,6 +83,8 @@ jobs:
       - name: Run statement-gate TSan stress
         shell: bash
         run: build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.ExecutorStatementGateTsanClean | tee tsan.log
+      - name: Run WAL timer TSan stress
+        run: build-tsan/reldb_regression_tests --gtest_filter=WalTest.NormalModeSyncThreadTsanClean
       - name: Upload TSan log on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -90,6 +92,18 @@ jobs:
           name: test-logs-tsan
           path: tsan.log
           if-no-files-found: ignore
+
+  crash-safety:
+    name: WAL hard-kill recovery (200 iterations)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRELDB_WERROR=ON
+      - name: Build regression tests
+        run: cmake --build build --parallel --target reldb_regression_tests
+      - name: Run seeded crash harness
+        run: tools/crashtest build/reldb_regression_tests 200
 
   formatting-and-lint:
     name: Formatting and Dockerfile lint

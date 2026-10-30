@@ -12,6 +12,7 @@
 #include "b_plus_tree.h"
 #include "executor.h"
 #include "api_server.h"
+#include "wal.h"
 
 using namespace relational_db;
 
@@ -76,15 +77,25 @@ int main() {
     std::cout << "Dashboard static path: " << dashboard_path << std::endl;
 
     std::shared_ptr<DiskManager> disk_manager;
+    std::shared_ptr<WriteAheadLog> wal;
     try {
-        disk_manager = std::make_shared<DiskManager>(db_path);
+        disk_manager = std::make_shared<DiskManager>(db_path, true);
+        wal = std::make_shared<WriteAheadLog>(db_path);
+        wal->Recover(*disk_manager);
+        disk_manager->ValidateHeader();
     } catch (const std::exception& ex) {
         std::cerr << "Failed to initialize database at '" << db_path << "': " << ex.what()
                   << std::endl;
         return 1;
     }
     auto bpm = std::make_shared<BufferPoolManager>(disk_manager);
-    auto executor = std::make_shared<Executor>(bpm);
+    std::shared_ptr<Executor> executor;
+    try {
+        executor = std::make_shared<Executor>(bpm, *wal);
+    } catch (const std::exception& ex) {
+        std::cerr << "Failed to initialize durable executor: " << ex.what() << std::endl;
+        return 1;
+    }
     auto api_server = std::make_shared<ApiServer>(bpm, disk_manager, executor, dashboard_path);
 
     std::atomic<bool> running{true};
@@ -108,6 +119,13 @@ int main() {
 
     if (signal_thread.joinable()) {
         signal_thread.join();
+    }
+
+    try {
+        wal->Checkpoint(*bpm);
+    } catch (const std::exception& ex) {
+        std::cerr << "Database checkpoint failed during shutdown: " << ex.what() << std::endl;
+        return 1;
     }
 
     std::cout << "Shutdown complete." << std::endl;

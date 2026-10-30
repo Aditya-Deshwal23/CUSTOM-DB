@@ -62,6 +62,23 @@ with readers. `TableHeap` has no independent concurrent-writer protocol; the
 executor gate also serializes its heap writes and guards heap reads against
 those writes.
 
+## WAL and checkpointing
+
+The buffer pool permits one active write transaction. Its first write-guard
+touch snapshots the page while holding that page's write latch, then briefly
+takes `pool_mutex_`; no code waits for a page latch while holding the pool
+mutex. Active transaction pages are excluded from eviction and flush. WAL
+write-back checks happen outside `pool_mutex_` and enforce the page-LSN
+durability boundary before database I/O.
+
+Checkpointing sets a gate under `pool_mutex_`, then releases the mutex before
+page I/O, database sync, WAL sync, and WAL replacement. New transactions are
+rejected while the gate is active. The WAL mutex serializes log operations and
+the periodic `normal`-mode sync thread; neither takes `pool_mutex_`. The
+checkpoint order is pool gate, page latch as needed, then WAL latch for
+write-ahead sync; no path holds the WAL latch while acquiring a page latch or
+the pool mutex.
+
 ## Other lock interactions
 
 `FileDiskManager::header_mutex_` serializes page-zero metadata reads/writes and
@@ -76,6 +93,7 @@ prints its seed. `DiskManagerTest.ConcurrentDistinctPageIo` exercises
 independent page I/O. Run the buffer-pool stress test under TSan as well as
 ASan/UBSan on the Linux CI host.
 
-No WAL/no-steal implementation is included in this phase. The default
-write-back policy allows dirty pages; Phase 5 must install a policy that
-enforces WAL ordering.
+The WAL's no-steal rule is enforced by transaction page snapshots and
+write-back checks. Direct buffer-pool write access remains a low-level API:
+callers using a durable executor must use its transaction gate and WAL-backed
+write path.

@@ -18,11 +18,20 @@ using DbValue = Value;
 using Predicate = std::function<bool(const Row&)>;
 
 class Executor {
-public:
-    explicit Executor(std::shared_ptr<BufferPoolManager> bpm) 
-        : bpm_(std::move(bpm)),
-          tree_(bpm_, IndexKey16Less(), IndexKeyKind::INT32) {
+   public:
+    explicit Executor(std::shared_ptr<BufferPoolManager> bpm) : bpm_(std::move(bpm)) {
+        tree_ = std::make_unique<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>>(
+            bpm_, IndexKey16Less(), IndexKeyKind::INT32);
         InitializeHeap();
+    }
+
+    Executor(std::shared_ptr<BufferPoolManager> bpm, WriteAheadLog& wal)
+        : bpm_(std::move(bpm)), wal_(&wal) {
+        auto transaction = bpm_->BeginTransaction(wal);
+        tree_ = std::make_unique<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>>(
+            bpm_, IndexKey16Less(), IndexKeyKind::INT32);
+        InitializeHeap();
+        transaction->Commit();
     }
 
     /**
@@ -32,19 +41,21 @@ public:
     std::string ExecuteQuery(const std::string& query);
 
     std::vector<Row> ScanWithPredicate(int start_key, int end_key, Predicate pred);
+    std::optional<std::string> IntegrityCheck();
 
     static std::string FormatValue(const DbValue& val);
 
-private:
+   private:
     static const Schema& SqlSchema();
     void InitializeHeap();
 
     std::shared_ptr<BufferPoolManager> bpm_;
     mutable std::shared_mutex statement_gate_;
-    BPlusTree<IndexKey16, uint64_t, IndexKey16Less> tree_;
+    WriteAheadLog* wal_{nullptr};
+    std::unique_ptr<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>> tree_;
     std::unique_ptr<TableHeap> heap_;
 };
 
-} // namespace relational_db
+}  // namespace relational_db
 
-#endif // EXECUTOR_H
+#endif  // EXECUTOR_H

@@ -129,3 +129,32 @@ cold cases include construction of a new 16-frame pool and index handle.
 The split regression also reports its leaf fill factors: ascending insertions
 reached 89.48% at 40,000 keys; seeded random insertion reached 70.87% at
 200,000 keys. These are regression observations, not timing guarantees.
+
+## WAL commit and checkpoint workloads
+
+`bench/wal_bench.cpp` measures one transaction inserting four distinct B+ tree
+keys per statement under `full`, `normal`, and `off`. It reports mean wall
+latency and processed-key throughput. The benchmark uses a 20 ms interval for
+`normal` so the interval sync thread runs during the short measurement; the
+production default is 1000 ms. One fixture initialization and cleanup is
+amortized across the iterations. The checkpoint benchmark builds 256 rows
+outside the timed interval, then measures `Checkpoint()` including dirty-page
+write-back, database sync, and WAL replacement.
+
+Command:
+
+```sh
+ALLOW_UNSAFE=1 ./build-release/reldb_wal_benchmarks --benchmark_min_time=0.1s
+```
+
+Observed on 2026-10-30, Apple M5 (`arm64`), macOS 27.0.1, Apple Clang 21,
+Google Benchmark 1.8.3, Release build. CPU frequency and thread-affinity
+metadata were unavailable. These are local observations, not CI thresholds.
+`off` is enabled only for this benchmark process with `ALLOW_UNSAFE=1`.
+
+| Mode/workload | Mean latency | Key throughput |
+|---|---:|---:|
+| `full`, four keys per commit | 34.7 us/commit | 160.961 k keys/s |
+| `normal`, four keys per commit | 6.98 us/commit | 642.73 k keys/s |
+| `off`, four keys per commit | 6.11 us/commit | 671.999 k keys/s |
+| `full`, checkpoint of 256 rows | 3.99 ms/checkpoint | n/a |

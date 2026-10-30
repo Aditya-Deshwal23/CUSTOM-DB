@@ -108,7 +108,7 @@ WritePageGuard PageAllocator::NewPage() {
         throw DbError(ErrorCode::IO_ERROR, "Database page IDs are exhausted");
     }
     const page_id_t page_id = static_cast<page_id_t>(page_count);
-    buffer_pool_.disk_manager_->Extend(1);
+    buffer_pool_.disk_manager_->ReservePages(1);
     WriteU64(header->data() + kPageCountOffset, page_count + 1U);
     return buffer_pool_.AllocatePageFrame(page_id);
 }
@@ -134,6 +134,11 @@ bool PageAllocator::DeletePage(page_id_t page_id) {
     const uint32_t old_head = ReadU32(header->data() + kFreeListHeadOffset);
     WriteU32(body->data(), old_head);
     page_guard.SetPageType(PageType::FREE);
+    if (buffer_pool_.HasActiveTransaction()) {
+        WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(page_id));
+        buffer_pool_.RecordFreePageState(page_id, true);
+        return true;
+    }
     try {
         if (!buffer_pool_.RetirePage(page_guard)) {
             *body = original_body;

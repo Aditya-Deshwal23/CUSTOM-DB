@@ -74,6 +74,27 @@ TEST(IndexKeyTest, SignedValuesAndNonUniqueRidsKeepMemcmpOrder) {
     EXPECT_TRUE(less(second, larger_value));
 }
 
+TEST(BPlusTreeTest, SignedInt64KeysAndNegativeRangeOperations) {
+    TemporaryDatabase database;
+    auto buffer_pool = MakePool(database.Path());
+    BPlusTree<int64_t, int64_t, std::less<int64_t>> tree(buffer_pool, std::less<int64_t>());
+
+    for (const int64_t key : { -10LL, -5LL, -1LL, 0LL, 1LL, 2LL, 8LL, 9LL }) {
+        ASSERT_TRUE(tree.Insert(key, key * 10LL));
+    }
+
+    const auto found = tree.GetValue(-1LL);
+    ASSERT_TRUE(found);
+    EXPECT_EQ(*found, -10LL);
+
+    const auto range = tree.RangeScan(-5LL, 8LL, true, false);
+    ASSERT_EQ(range.size(), 5U);
+    EXPECT_EQ(range.front().first, -5LL);
+    EXPECT_EQ(range.back().first, 2LL);
+    EXPECT_FALSE(tree.Validate());
+    buffer_pool->AssertNoPinsHeld();
+}
+
 TEST(BPlusTreeTest, IndexKey16UniqueAndRangeOperations) {
     TemporaryDatabase database;
     auto buffer_pool = MakePool(database.Path());

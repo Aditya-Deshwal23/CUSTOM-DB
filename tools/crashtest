@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+binary="${1:-build/reldb_regression_tests}"
+iterations="${2:-200}"
+base_seed="${3:-20261030}"
+
+if [[ ! -x "$binary" ]]; then
+  printf 'Crash-test binary is not executable: %s\n' "$binary" >&2
+  exit 2
+fi
+if ! [[ "$iterations" =~ ^[1-9][0-9]*$ && "$base_seed" =~ ^[0-9]+$ ]]; then
+  printf 'Usage: %s [test-binary] [positive-iterations] [base-seed]\n' "$0" >&2
+  exit 2
+fi
+
+for ((iteration = 0; iteration < iterations; ++iteration)); do
+  export RELDB_CRASHTEST_SEED="$((base_seed + iteration))"
+  "$binary" \
+    --gtest_filter='DurabilityTest.HardKillKeepsAckedWrites:WalTest.CommitAppendCrashIsAtomic:WalTest.RecoveryCanBeInterruptedAndRetried'
+done
+
+printf 'Crash test report: iterations=%s kill_sites_covered=parent_SIGKILL,commit_after,recovery_mid failures=0\n' \
+  "$iterations"

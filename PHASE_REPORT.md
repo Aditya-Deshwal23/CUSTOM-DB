@@ -99,3 +99,28 @@ The measured B+ tree miss count differs from the original report (3,341, first l
 - WAL ordering remains an extension hook only; the default write-back policy allows writes, and no transaction/no-steal behavior is implemented.
 - `AssertNoPinsHeld()` is per calling thread; guards must not outlive their manager or be destroyed on a different thread from the one that acquired the latch.
 - Historical pre-change buffer-pool timings were not recorded. The documented numbers compare the two new policies and are local observations, not CI thresholds.
+
+## Phase 5: durable redo WAL and crash recovery
+
+### Changes
+
+- Connected the WAL to normal startup and statement writes. Each write statement is a single-writer auto-commit transaction with before-image rollback, no-steal protection, full-page after-images, and a COMMIT record.
+- Added CRC32C-protected, explicit little-endian WAL records, per-commit buffered append, durability modes, WAL-before-page-write enforcement, checkpointing, recovery replay, and torn-tail truncation.
+- Added failpoints, transaction-size rollback coverage, interrupted-recovery and commit-append process tests, integrity checking, a Linux crash runner, PR/nightly crash-workflow jobs, and a WAL benchmark.
+- Recorded the decision and rejected ARIES alternative in [docs/adr/0001-wal-design.md](docs/adr/0001-wal-design.md); protocol and failpoint behavior are in [docs/WAL_AND_RECOVERY.md](docs/WAL_AND_RECOVERY.md). Updated [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md), [docs/CONCURRENCY.md](docs/CONCURRENCY.md), [docs/CLAIMS.md](docs/CLAIMS.md), [README.md](README.md), and [ARCHITECTURE.md](ARCHITECTURE.md).
+
+### Validation on this macOS host
+
+| Command | Result |
+|---|---|
+| Debug build and full CTest | Passed; CTest completed in 315.50 s. |
+| Release build and full CTest | Passed; CTest completed in 107.45 s. |
+| ASan+UBSan build and full CTest | Passed; CTest completed in 805.91 s. |
+| WAL/persistence-focused regressions | 10 passed; 3 Linux process-crash tests skipped. |
+| TSan disk-I/O, statement-gate, and WAL-sync-thread stress tests | 3 passed; all printed seed `20261030`. |
+| `git diff --check` and `bash -n tools/crashtest` | Passed. |
+
+### Limitations
+
+- The Linux-only hard-kill, failpoint-process, and 200/5,000-iteration crash-runner jobs could not execute on this macOS host. Their CI/nightly execution evidence remains pending in [docs/CLAIMS.md](docs/CLAIMS.md).
+- The `--check` CLI remains planned for Phase 13; `Executor::IntegrityCheck()` is implemented and covered by restart tests.

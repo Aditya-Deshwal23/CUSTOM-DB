@@ -1,12 +1,6 @@
 #ifndef BUFFER_POOL_MANAGER_H
 #define BUFFER_POOL_MANAGER_H
 
-#include "clock_replacer.h"
-#include "config.h"
-#include "disk_manager.h"
-#include "page.h"
-#include "page_guard.h"
-
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -14,6 +8,13 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "clock_replacer.h"
+#include "config.h"
+#include "disk_manager.h"
+#include "page.h"
+#include "page_guard.h"
+#include "wal.h"
 
 namespace relational_db {
 
@@ -28,7 +29,9 @@ class WriteBackPolicy {
 
 class AllowAllWriteBackPolicy final : public WriteBackPolicy {
    public:
-    bool CanWriteBack(page_id_t) const override { return true; }
+    bool CanWriteBack(page_id_t) const override {
+        return true;
+    }
     void BeforeWriteBack(page_id_t, uint64_t) override {}
 };
 
@@ -50,6 +53,10 @@ struct FrameInfo {
 };
 
 class BufferPoolManager {
+    friend class TxnContext;
+    friend class WriteAheadLog;
+    friend class TransactionAwareWriteBackPolicy;
+
    public:
     explicit BufferPoolManager(std::shared_ptr<IDiskManager> disk_manager);
     BufferPoolManager(size_t pool_size, std::shared_ptr<IDiskManager> disk_manager);
@@ -62,6 +69,7 @@ class BufferPoolManager {
     WritePageGuard FetchWrite(page_id_t page_id);
     BasicPageGuard FetchBasic(page_id_t page_id);
     WritePageGuard NewPageGuarded();
+    std::shared_ptr<TxnContext> BeginTransaction(WriteAheadLog& wal);
 
     bool DeletePage(page_id_t page_id);
     bool FlushPage(page_id_t page_id);
@@ -72,10 +80,20 @@ class BufferPoolManager {
     std::vector<FrameInfo> Snapshot() const;
     size_t pinned_frames() const;
     void AssertNoPinsHeld() const;
-    size_t PoolSize() const noexcept { return frames_.size(); }
+    size_t PoolSize() const noexcept {
+        return frames_.size();
+    }
+    uint64_t PageCount() const {
+        return disk_manager_->SizeInPages();
+    }
+    void VerifyDiskPages() const;
 
-    uint64_t GetHits() const { return hits_.load(std::memory_order_relaxed); }
-    uint64_t GetMisses() const { return misses_.load(std::memory_order_relaxed); }
+    uint64_t GetHits() const {
+        return hits_.load(std::memory_order_relaxed);
+    }
+    uint64_t GetMisses() const {
+        return misses_.load(std::memory_order_relaxed);
+    }
 
    private:
     friend class PageAllocator;
@@ -88,6 +106,14 @@ class BufferPoolManager {
                              std::thread::id origin_thread) noexcept;
     void ReleaseFrame(Frame* frame, bool dirty, std::thread::id origin_thread) noexcept;
     void RegisterPinLocked(std::thread::id origin_thread);
+    static void RegisterMutation(void* owner, Frame* frame);
+    void RegisterMutation(Frame* frame);
+    void CommitTransaction(TxnContext& transaction);
+    void RollbackTransaction(TxnContext& transaction) noexcept;
+    void BeginCheckpoint(WriteAheadLog& wal);
+    void EndCheckpoint() noexcept;
+    void RecordFreePageState(page_id_t page_id, bool will_be_free);
+    bool HasActiveTransaction() const;
     void FlushFrame(Frame* frame);
     static size_t ConfiguredPoolSize();
 
@@ -102,6 +128,9 @@ class BufferPoolManager {
     std::vector<frame_id_t> free_list_;
     mutable std::mutex pool_mutex_;
     std::shared_ptr<WriteBackPolicy> write_back_policy_;
+    std::shared_ptr<TxnContext> active_transaction_;
+    WriteAheadLog* wal_{nullptr};
+    bool checkpoint_in_progress_{false};
 
     std::atomic<uint64_t> hits_{0};
     std::atomic<uint64_t> misses_{0};

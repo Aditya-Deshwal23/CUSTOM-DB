@@ -56,32 +56,53 @@ class IDiskManager {
         ReadPage(page_id, page_data);
         type = PageType::HEAP;
     }
+    virtual void ReadPage(page_id_t page_id, char* page_data, PageType& type, uint16_t& flags,
+                          uint64_t& lsn) {
+        ReadPage(page_id, page_data, type);
+        flags = 0;
+        lsn = 0;
+    }
     virtual void WritePage(page_id_t page_id, const char* page_data, PageType type = PageType::HEAP,
                            uint16_t flags = 0, uint64_t lsn = 0) = 0;
     virtual void WriteHeaderPage(const char* page_data) = 0;
+    virtual void WriteHeaderPage(const char* page_data, uint16_t flags, uint64_t lsn) {
+        (void)flags;
+        (void)lsn;
+        WriteHeaderPage(page_data);
+    }
+    virtual void WritePageImage(page_id_t page_id, const uint8_t* image);
     virtual void Sync() = 0;
     virtual uint64_t SizeInPages() const = 0;
     virtual void Extend(uint64_t page_count) = 0;
+    virtual void ReservePages(uint64_t page_count) { Extend(page_count); }
+    virtual void RestorePageCount(uint64_t page_count) noexcept { (void)page_count; }
     virtual DiskStats Stats() const = 0;
 };
 
 class FileDiskManager final : public IDiskManager {
    public:
-    explicit FileDiskManager(const std::string& db_file);
+    explicit FileDiskManager(const std::string& db_file, bool allow_wal_recovery = false);
     ~FileDiskManager() override;
 
     FileDiskManager(const FileDiskManager&) = delete;
     FileDiskManager& operator=(const FileDiskManager&) = delete;
 
     void Open();
+    void ValidateHeader();
     void ReadPage(page_id_t page_id, char* page_data) override;
     void ReadPage(page_id_t page_id, char* page_data, PageType& type) override;
+    void ReadPage(page_id_t page_id, char* page_data, PageType& type, uint16_t& flags,
+                  uint64_t& lsn) override;
     void WritePage(page_id_t page_id, const char* page_data, PageType type = PageType::HEAP,
                    uint16_t flags = 0, uint64_t lsn = 0) override;
     void WriteHeaderPage(const char* page_data) override;
+    void WriteHeaderPage(const char* page_data, uint16_t flags, uint64_t lsn) override;
+    void WritePageImage(page_id_t page_id, const uint8_t* image) override;
     void Sync() override;
     uint64_t SizeInPages() const override;
     void Extend(uint64_t page_count) override;
+    void ReservePages(uint64_t page_count) override;
+    void RestorePageCount(uint64_t page_count) noexcept override;
     DiskStats Stats() const override;
 
    private:
@@ -95,6 +116,7 @@ class FileDiskManager final : public IDiskManager {
                        uint64_t elapsed_us);
 
     std::string file_name_;
+    bool allow_wal_recovery_{false};
     int file_descriptor_{-1};
     std::atomic<uint64_t> page_count_{0};
     mutable std::mutex open_mutex_;

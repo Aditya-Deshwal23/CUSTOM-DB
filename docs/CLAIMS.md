@@ -35,13 +35,18 @@
 | B+ tree insert/delete/get/range operations match an oracle under constant eviction | verified | `BPlusTreeFuzzTest.MillionOperationsAgainstMapWithConstantEviction`; 1,000 validations and pin checks every operation |
 | B+ tree split leaves preserve a complete sorted chain and satisfy occupancy rules | verified | `BPlusTreeTest.RangeScanTerminatesAfterSplit`; `BPlusTreeTest.AscendingAndRandomFillFactorsBeatHalfFullBaseline`; `docs/benchmarks.md` |
 | Range scans terminate and return all sorted results after splits | verified | `BPlusTreeTest.RangeScanTerminatesAfterSplit`; the Linux test retains its memory/time-limited child |
-| API data is recovered using the WAL on normal startup | removed | `src/main.cpp` does not invoke WAL recovery; no WAL-backed API write path |
-| The WAL can append records and recover after a torn tail | in progress | `WalTest.DISABLED_RecordAppendedAfterTornTailIsRecoverable` |
-| The WAL provides recovery or WAL-before-page durability | removed | WAL remains disconnected from normal API startup/write recovery; page persistence uses the separate `IDiskManager::Sync()` contract |
-| The whole database representation is portable across endianness and compiler ABI | removed | The B+ tree payload is explicitly encoded, but the separate WAL prototype format remains host-native |
+| API data is recovered using the WAL on normal startup | verified | `src/main.cpp`; `PersistenceTest.ExecutorIndexAndRowsSurviveCleanRestart` |
+| The WAL can append after a torn tail and recover committed statements | verified | `WalTest.RecordAppendedAfterTornTailIsRecoverable` |
+| WAL commits are synced before page write-back in `full` and `normal` modes | verified | `WalTest.NormalModeSyncsBeforeDatabaseWriteBack`; buffer-pool eviction and flush paths call `WriteAheadLog::EnsureDurable` |
+| WAL records and page images are explicit little-endian and CRC32C checked | verified | `docs/FILE_FORMAT.md`; `src/wal.cpp`; `src/crc32c.cpp`; `WalTest.RecordAppendedAfterTornTailIsRecoverable` |
+| Statement rollback restores before-images, page allocation state, and no-steal pages | verified | `WalTest.RollbackRestoresPageImagesAndAllocationState` |
+| `Executor::IntegrityCheck()` checks page checksums, B+ tree structure, and heap/index agreement | verified | `src/executor.cpp`; `BPlusTree::Validate()`; clean-restart integrity assertions in `PersistenceTest.ExecutorIndexAndRowsSurviveCleanRestart` |
+| A process crash during a normal API write preserves acknowledged writes | in progress | `DurabilityTest.HardKillKeepsAckedWrites` is Linux-only; local validation skipped on macOS |
+| A 200-iteration PR and 5,000-iteration nightly crash harness reports kill-site coverage | in progress | Pending Linux crash runner and CI/nightly execution evidence |
+| WAL commit latency/throughput per durability mode and checkpoint pause are measured | verified | `reldb_wal_benchmarks`; `docs/benchmarks.md` records the run command, host, modes, and results |
 | API query commands support integer `INSERT <key> <value>` and point `SELECT <key>` | verified | `scripts/verify_resume_claims.sh` exercises these commands |
 | The executor supports arbitrary SQL tables or `SELECT * FROM Users` | removed | The executor supports only integer-key INSERT/SELECT; arbitrary SQL parsing/catalog queries are not implemented |
-| The engine implements general SQL, a catalog, transactions, or a query planner | removed | The API executor only supports integer `INSERT`/point `SELECT`; its persistent rows and index do not provide general SQL, a catalog, transactions, or a query planner |
+| The engine implements general SQL, a user-facing catalog, multi-statement transaction isolation, or a query planner | removed | The API executor only supports integer `INSERT`/point `SELECT`; statement-atomic auto-commit does not provide general SQL, a user-facing catalog, multi-statement transactions/isolation, or a query planner |
 | TableHeap is safe for concurrent writers or readers | removed | `docs/CONCURRENCY.md`; no table-level synchronization or TSan stress test is provided |
 | Query parsing is zero-copy using `std::string_view` | removed | `src/executor.cpp` uses `std::string` token copies |
 | The B+ tree uses latch crabbing | removed | `docs/CONCURRENCY.md`; writers are serialized by the caller's statement gate |
@@ -51,4 +56,4 @@
 | Dashboard schema and execution trace represent a live catalog/backend trace | removed | `README.md`; the simulation trace is explicitly illustrative |
 | The dashboard uses no random-number calls to fabricate metrics | verified | CI's `Check metrics honesty` step runs `MetricsTest.NoFabricatedValues`; `scripts/run_known_bugs.sh` reports it |
 | A 10,000-record HTTP benchmark measured specific insert/read latency and throughput | in progress | `scripts/benchmark_api.py` and historical results in `docs/RESUME_EVIDENCE_REPORT.md`; not a CI performance gate |
-| The project is high-performance, production-grade, ACID, or fully durable | removed | No corresponding benchmark, transaction, recovery, or durability verification exists |
+| The project is high-performance, production-grade, or general-purpose ACID | removed | The engine supports single-writer, statement-atomic redo recovery; it does not implement general SQL transaction isolation |

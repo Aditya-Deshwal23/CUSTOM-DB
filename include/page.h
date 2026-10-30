@@ -20,6 +20,7 @@ struct Frame {
     std::atomic<bool> dirty{false};
     page_id_t page_id{INVALID_PAGE_ID};
     PageType page_type{PageType::HEAP};
+    uint16_t page_flags{0};
     std::shared_mutex rwlatch;
     IoState io_state{IoState::READY};
     std::condition_variable condition;
@@ -35,6 +36,7 @@ struct Frame {
           dirty(other.dirty.load(std::memory_order_relaxed)),
           page_id(other.page_id),
           page_type(other.page_type),
+          page_flags(other.page_flags),
           io_state(other.io_state),
           lsn(other.lsn) {}
     Frame& operator=(Frame&&) = delete;

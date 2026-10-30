@@ -54,8 +54,10 @@ space is reserved in 64-page growth chunks. The buffer-pool `PageAllocator`
 owns allocation and reuse. A free page stores its next free-page ID as a
 little-endian signed 32-bit value in the first four bytes of its body; `-1`
 terminates the list. Page-zero metadata is updated through a page guard and
-written with refreshed header and page CRC32C values. This allocator is not
-transactional and does not provide crash-safe free-list updates.
+written with refreshed header and page CRC32C values. In the WAL-backed
+executor, page zero and allocator changes are included in the statement's
+before-images and committed page images. Direct buffer-pool use without a WAL
+transaction does not provide that transactional guarantee.
 
 ## Table heap header page
 
@@ -202,5 +204,35 @@ RIDs contain a signed 32-bit page ID and unsigned 16-bit slot number. Their
 64-bit index representation stores the page ID in bits 16-47 and the slot in
 bits 0-15; bits 48-63 are reserved and must be zero.
 
-The WAL remains a separate prototype format and is not upgraded by this
-change. It does not participate in this page format's durability guarantees.
+## Write-ahead log
+
+The WAL path is `<DB_PATH>-wal`. All multibyte values are explicit
+little-endian; no host structure layout is written to disk. WAL and page
+checksums use CRC32C.
+
+The WAL begins with a 24-byte header:
+
+| Offset | Width | Field |
+|---:|---:|---|
+| 0 | 8 | Magic `RDBWAL\0\1` |
+| 8 | 4 | WAL version (`1`) |
+| 12 | 8 | Base LSN |
+| 20 | 4 | CRC32C over bytes `[0, 20)` |
+
+Each record is `u32 length`, `u8 type`, `u64 txn_id`, `u64 lsn`, a
+type-dependent payload, and `u32 CRC32C`. Length includes the length field and
+trailing CRC. The record CRC covers every record byte except the trailing CRC,
+including the length field.
+
+| Type | Value | Payload |
+|---|---:|---|
+| `PAGE_IMAGE` | 1 | `u32 page_id` followed by one complete 4096-byte physical page image, including its page header and CRC32C |
+| `COMMIT` | 2 | Empty; the transaction ID is in the record header |
+| `CHECKPOINT` | 3 | Empty |
+
+LSNs increase by one across records and begin at the header base LSN. A page
+image contains the complete encoded page with its LSN set to the record LSN.
+Only page images preceding a valid COMMIT for the same transaction are replayed.
+Recovery truncates the log to a synced header after replay, so the next append
+begins at the recovered base LSN. Compile-time layout assertions in
+`src/wal.cpp` pin the header and record sizes and their field offsets.
