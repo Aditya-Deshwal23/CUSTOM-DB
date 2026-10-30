@@ -178,7 +178,6 @@ void BufferPoolManager::FlushAllPages() {
     std::unique_lock<std::shared_mutex> lock(latch_);
     
     for (auto const& pair : page_table_) {
-        page_id_t page_id = pair.first;
         frame_id_t frame_id = pair.second;
         Page* page = &pages_[frame_id];
         if (page->is_dirty_) {

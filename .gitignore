@@ -1,6 +1,7 @@
 # Compilation/Build
 build/
 build_cli/
+build-*/
 .cache/
 bin/
 obj/

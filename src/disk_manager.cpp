@@ -63,10 +63,10 @@ void DiskManager::ReadPage(page_id_t page_id, char* page_data) {
     if (db_io_.bad()) {
         throw std::runtime_error("I/O error while reading");
     }
-    
-    int read_count = db_io_.gcount();
-    if (read_count < PAGE_SIZE) {
-        std::memset(page_data + read_count, 0, PAGE_SIZE - read_count);
+
+    std::streamsize read_count = db_io_.gcount();
+    if (read_count < static_cast<std::streamsize>(PAGE_SIZE)) {
+        std::memset(page_data + read_count, 0, PAGE_SIZE - static_cast<size_t>(read_count));
     }
 }
 

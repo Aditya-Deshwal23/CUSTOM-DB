@@ -1,0 +1,4 @@
+Checks: 'bugprone-*,performance-*,cppcoreguidelines-owning-memory,modernize-use-override,modernize-use-nullptr,clang-analyzer-*'
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(include|src|tests|bench)/'
+FormatStyle: file

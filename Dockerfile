@@ -2,6 +2,7 @@ FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -18,12 +19,15 @@ COPY include ./include
 COPY src ./src
 
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+        -DRELDB_BUILD_TESTS=OFF \
+        -DRELDB_BUILD_BENCHMARKS=OFF \
     && cmake --build build --config Release -j
 
 FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
