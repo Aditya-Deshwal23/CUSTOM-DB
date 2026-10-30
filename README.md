@@ -1,75 +1,53 @@
-# Custom DB Engine
+# CUSTOM-DB
 
-A custom relational database and storage engine implemented in C++ with a Crow HTTP backend and a vanilla static dashboard. The project is packaged as one Dockerized web service: the backend exposes database APIs, serves the dashboard from `dashboard/`, and provides a health check for deployment platforms.
+CUSTOM-DB is a C++17 storage-engine prototype with a Crow HTTP service and a vanilla HTML/CSS/JavaScript dashboard. One Docker image runs the backend and serves the static dashboard; there is no frontend framework or JavaScript build step.
 
-## Live Demo
+## Status & limitations
 
-Live Render deployment: [https://custom-db-engine.onrender.com](https://custom-db-engine.onrender.com)
+### Implemented
 
-Render Free tier is currently used, so the first request after inactivity may take some time while the service wakes up.
+- `GET /health`, `GET /api/metrics`, and `POST /api/query` are served by Crow.
+- The query API supports session-scoped integer commands: `INSERT <key> <value>` and `SELECT <key>`.
+- The service reads `PORT` and `DB_PATH`, serves the dashboard from the same origin, and handles SIGINT/SIGTERM shutdown.
+- The root Dockerfile builds a single service image. Docker Compose mounts a named volume at `/data`.
 
-Available routes:
+### Prototype
+
+- Disk pages, a buffer pool, a clock replacer, a B+ tree, a query executor, and a WAL implementation exist in the source tree. The API's B+ tree root is not persisted, and the WAL is not connected to the normal write path.
+- `/api/metrics` reports observations from a seeded synthetic workload. It is not authoritative engine-wide telemetry.
+- The dashboard's schema visualization and simulation trace are illustrative. Simulation mode shows a persistent warning; the trace is not a report of backend operations.
+- The database file uses a host-native representation and is not a portable, versioned storage format.
+
+### Not implemented
+
+- SQL tables, schemas, general SQL syntax, transactions, crash recovery, durable API records, or SQL statements such as `SELECT * FROM Users`.
+- Durable database persistence across process restarts. A mounted volume retains the file, but the B+ tree root is not restored.
+- WAL-backed durability, `fsync` guarantees, zero-copy query parsing, writer latch crabbing, or measured disk-I/O latency.
+- Production-grade concurrency, performance, or durability guarantees.
+
+See [docs/CLAIMS.md](docs/CLAIMS.md) for claim-by-claim evidence and [docs/RESUME_EVIDENCE_REPORT.md](docs/RESUME_EVIDENCE_REPORT.md) for the existing local audit.
+
+## Routes
 
 - `/`: dashboard
 - `/health`: health check
-- `/api/metrics`: runtime metrics
-- `/api/query`: query execution API
+- `/api/metrics`: synthetic-workload metrics
+- `/api/query`: integer insert/select API
 
-## Project Overview
+The current Render demo is [custom-db-engine.onrender.com](https://custom-db-engine.onrender.com). Render availability and filesystem persistence depend on the configured service and plan; the service does not restore API records after restart.
 
-- C++ storage engine with page, buffer pool, disk manager, B+ tree, WAL, and executor components.
-- Crow-based HTTP API for runtime metrics and query execution.
-- Vanilla HTML/CSS/JavaScript dashboard served by the same backend origin.
-- Docker deployment with configurable port and database path.
-- Persistent storage support through a mounted data directory.
+## Build and run
 
-## Technology
-
-- C++17
-- Crow
-- CMake
-- Docker
-- Render
-- Vanilla HTML, CSS, and JavaScript
-
-## Local Docker Run
+See [RUN_INSTRUCTIONS.md](RUN_INSTRUCTIONS.md) for native, Docker, and development commands. A quick Docker run is:
 
 ```bash
 docker build -t custom-db .
-docker run --rm -p 8080:8080 -e PORT=8080 -e DB_PATH=/data/custom.db -v custom-db-data:/data custom-db
+docker run --rm -p 8080:8080 -e PORT=8080 -e DB_PATH=/data/custom.db \
+  -v custom-db-data:/data custom-db
 ```
 
-Then open [http://localhost:8080](http://localhost:8080).
+The dashboard console accepts `INSERT 42 100` and then `SELECT 42`. SQL examples such as `SELECT * FROM Users` are not supported.
 
-## Deployment
+## Verification
 
-The deployed service is a Dockerized C++ Crow backend. The same backend serves the static dashboard from `dashboard/`, so the dashboard can call `/api/metrics` and `/api/query` on the same origin without a separate frontend deployment.
-
-Render deployment uses the root `Dockerfile`.
-
-Required environment variables:
-
-- `PORT`: HTTP port used by Crow. Defaults to `8080` locally.
-- `DB_PATH`: database file path used by the storage engine. Defaults to `./test.db` locally.
-
-On Render Free tier, filesystem storage is temporary. For production persistence, mount a persistent disk at `/data` and set:
-
-```bash
-DB_PATH=/data/custom.db
-```
-
-## Health Check
-
-```bash
-curl https://custom-db-engine.onrender.com/health
-```
-
-Expected response:
-
-```json
-{"status":"ok"}
-```
-
-## Documentation
-
-Detailed local build, Docker, Docker Compose, and deployment instructions are in [RUN_INSTRUCTIONS.md](RUN_INSTRUCTIONS.md).
+CI builds GCC and Clang Debug/Release configurations, runs CTest, builds ASan+UBSan and TSan configurations, checks changed C++ formatting, lints the Dockerfile, and builds the image without pushing it. `scripts/run_known_bugs.sh` runs the disabled regression cases and prints their current results.

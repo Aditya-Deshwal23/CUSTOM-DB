@@ -159,6 +159,22 @@ header {
     color: var(--primary);
 }
 
+.simulated-ribbon {
+    display: block;
+    padding: 0.8rem 1rem;
+    border: 2px solid var(--warning);
+    background: rgba(245, 158, 11, 0.16);
+    color: #fbbf24;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-align: center;
+}
+
+.simulated-ribbon[hidden] {
+    display: none;
+}
+
 /* Telemetry Ribbon */
 .telemetry-ribbon {
     display: grid;
@@ -466,4 +482,3 @@ header {
 .table-hit {
     animation: table-glow 0.6s ease-out;
 }
-

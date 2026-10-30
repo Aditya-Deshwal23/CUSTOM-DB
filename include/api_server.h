@@ -65,21 +65,22 @@ public:
         });
 
         CROW_ROUTE(app_, "/api/metrics")
-        ([this](const crow::request& req){
+        ([this]() {
             crow::json::wvalue x;
             x["cache_hit_rate"] = cache_hit_rate_.load();
             x["query_throughput"] = query_rate_.load();
             x["avg_latency"] = avg_latency_.load();
             x["error_count"] = error_count_.load();
-            x["active_latches"] = (rand() % 4);
-            x["avg_io_latency"] = (avg_latency_.load() / 3.0);
+            x["source"] = "synthetic_workload";
             return crow::response(x);
         });
 
         CROW_ROUTE(app_, "/api/query").methods(crow::HTTPMethod::POST)
         ([this](const crow::request& req){
             auto x = crow::json::load(req.body);
-            if (!x) return crow::response(400);
+            if (!x || !x.has("query") || x["query"].t() != crow::json::type::String) {
+                return crow::response(400);
+            }
             std::string query = x["query"].s();
             
             // Execute query via engine

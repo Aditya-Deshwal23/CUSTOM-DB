@@ -4,8 +4,8 @@ This repo deploys as one C++ Crow backend that serves the vanilla static dashboa
 
 ## Prerequisites
 
-- CMake 3.14+
-- A C++17 compiler such as GCC, Clang, or Visual Studio 2022
+- CMake 3.20+
+- A C++17 compiler such as GCC, Clang, or MinGW/UCRT64
 - Git, required by CMake FetchContent for Crow and Asio
 - Docker, optional for containerized local testing
 
@@ -14,7 +14,7 @@ This repo deploys as one C++ Crow backend that serves the vanilla static dashboa
 - `PORT`: HTTP port for the Crow server. Defaults to `8080`.
 - `DB_PATH`: database file path. Defaults to `./test.db`.
 
-In production, `DB_PATH` must point to persistent storage. For containers, use a mounted volume such as `/data/custom.db`.
+For containers, `DB_PATH` can point to a mounted volume such as `/data/custom.db`. The volume retains page-file bytes, but API records are not restored after restart because the tree root is not persisted.
 
 ## Local Build And Run
 
@@ -28,7 +28,7 @@ PORT=8080 DB_PATH=./test.db ./build/relational_db
 
 Open [http://localhost:8080](http://localhost:8080). The health check is available at [http://localhost:8080/health](http://localhost:8080/health).
 
-On Windows with MSYS2, configure with your MinGW generator/compiler as needed:
+On Windows with MSYS2/UCRT64, configure with your MinGW generator/compiler as needed:
 
 ```bash
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe -DCMAKE_BUILD_TYPE=Release
@@ -43,7 +43,7 @@ Build the production image:
 docker build -t custom-db .
 ```
 
-Run it with persistent database storage:
+Run it with a named volume:
 
 ```bash
 docker run --rm -p 8080:8080 \
@@ -73,12 +73,6 @@ Render:
 - Set `DB_PATH` to a path on a mounted persistent disk, for example `/data/custom.db`.
 - Mount persistent storage at `/data`.
 
-Fly.io:
-- Deploy with the Dockerfile from the repo root.
-- Keep the service internal port aligned with `PORT=8080`.
-- Create and mount a Fly volume at `/data`.
-- Set `DB_PATH=/data/custom.db`.
-
 The dashboard uses same-origin API calls when served by the backend, so production requests go to `/api/metrics` and `/api/query` on the same host.
 
 ## Local Dashboard Demo Mode
@@ -92,12 +86,21 @@ python -m http.server 5500
 
 Visit [http://localhost:5500](http://localhost:5500). The dashboard keeps a localhost backend fallback for ports `5500` and `5501`; if the backend is unavailable, it reverts to simulation mode.
 
-## Console Commands
+## Supported Console Commands
 
-Try entering these commands in the dashboard SQL Console:
+The executor accepts these integer commands:
 
-- `SELECT * FROM Users`
 - `INSERT 42 100`
-- `SELECT 10`
+- `SELECT 42`
 
+`SELECT * FROM Users` is not supported; there is no SQL table/schema implementation.
 
+## Tests and checks
+
+```bash
+ctest --test-dir build --output-on-failure
+scripts/run_known_bugs.sh
+scripts/check.sh
+```
+
+Known-bug tests are disabled in normal CTest runs. The dedicated script enables them and prints a results table.

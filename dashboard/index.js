@@ -23,55 +23,72 @@ const CONFIG = {
 
 const state = {
     metrics: {
-        cacheHitRate: 0,
-        queryThroughput: 0,
-        ioLatency: 0,
-        activeLatches: 0
+        cacheHitRate: null,
+        queryThroughput: null,
+        avgLatency: null,
+        errorCount: null
     },
     isSimulationMode: true,
     clockHand: 0,
     pinnedFrames: new Set(),
+    nextSimulationFrame: 0,
     isExecuting: false
 };
 
 let liveMetricsInterval = null;
 let simulationInterval = null;
 
-async function toggleMode() {
-    state.isSimulationMode = !state.isSimulationMode;
+function renderMode() {
     const btn = document.getElementById('modeToggleBtn');
     const dot = document.getElementById('statusDot');
     const text = document.getElementById('statusText');
     const badge = document.getElementById('mainStatusBadge');
+    const ribbon = document.getElementById('simulationRibbon');
 
+    ribbon.hidden = !state.isSimulationMode;
     if (state.isSimulationMode) {
-        // Switch to Simulation Mode
-        if (liveMetricsInterval) clearInterval(liveMetricsInterval);
-        
         btn.textContent = "SWITCH TO LIVE ENGINE";
         text.textContent = "SIMULATION MODE";
         dot.className = "status-dot simulation";
         badge.className = "status-badge simulation";
-        
-        simulationInterval = setInterval(runTelemetrySimulation, CONFIG.FETCH_INTERVAL);
-        runTelemetrySimulation();
-        renderMetrics();
     } else {
-        // Switch to Live Engine
-        if (simulationInterval) clearInterval(simulationInterval);
-        
         btn.textContent = "SWITCH TO SIMULATION";
         text.textContent = "LIVE ENGINE CONNECTED";
         dot.className = "status-dot online";
         badge.className = "status-badge online";
-        
-        // Initial fetch to verify connection
+    }
+}
+
+async function toggleMode() {
+    state.isSimulationMode = !state.isSimulationMode;
+    if (state.isSimulationMode) {
+        if (liveMetricsInterval) clearInterval(liveMetricsInterval);
+        liveMetricsInterval = null;
+        renderMode();
+        runTelemetrySimulation();
+        simulationInterval = setInterval(runTelemetrySimulation, CONFIG.FETCH_INTERVAL);
+    } else {
+        if (simulationInterval) clearInterval(simulationInterval);
+        simulationInterval = null;
+        renderMode();
         try {
-            await updateTelemetry(); // This will handle failsafe if it throws
-            liveMetricsInterval = setInterval(updateTelemetry, CONFIG.FETCH_INTERVAL);
-        } catch (e) {
-            // Failsafe is handled inside updateTelemetry or we can catch here
-            console.error("Failed to connect to Live Engine, reverting...");
+            await updateTelemetry();
+            liveMetricsInterval = setInterval(() => {
+                updateTelemetry().catch((error) => {
+                    console.error("Live metrics request failed:", error);
+                    clearInterval(liveMetricsInterval);
+                    liveMetricsInterval = null;
+                    state.isSimulationMode = true;
+                    renderMode();
+                    runTelemetrySimulation();
+                });
+            }, CONFIG.FETCH_INTERVAL);
+        } catch (error) {
+            console.error("Failed to connect to the live engine:", error);
+            state.isSimulationMode = true;
+            renderMode();
+            runTelemetrySimulation();
+            simulationInterval = setInterval(runTelemetrySimulation, CONFIG.FETCH_INTERVAL);
         }
     }
 }
@@ -80,7 +97,7 @@ function initPanZoom() {
     // Completely disable all scroll-to-zoom and drag-to-pan as per Step 1
     const container = document.getElementById('topologyContainer');
     if (!container) return;
-    
+
     container.style.cursor = 'default';
     container.addEventListener('wheel', (e) => {
         // Allow default scroll behavior (global scrolling)
@@ -121,17 +138,17 @@ function initTopology() {
         const from = CONFIG.TABLES.find(t => t.id === rel.from);
         const to = CONFIG.TABLES.find(t => t.id === rel.to);
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        
+
         // Calculate curve points for smooth organic flow (Bezier)
         const startX = from.x + 80;
         const startY = from.y;
         const endX = to.x - 80;
         const endY = to.y;
-        
+
         // Midpoint-based control points for elegant curves
         const midX = (startX + endX) / 2;
         const d = `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`;
-        
+
         path.setAttribute("d", d);
         path.setAttribute("class", "topology-link");
         path.setAttribute("id", `link-${from.id}-${to.id}`);
@@ -144,19 +161,19 @@ function initTopology() {
         g.setAttribute("class", "table-node-group");
         g.setAttribute("id", `node-${table.id}`);
         g.setAttribute("transform", `translate(${table.x}, ${table.y})`);
-        
+
         const w = 170;
         const headerH = 34;
         const rowH = 22;
         const h = headerH + (table.cols.length * rowH) + 12;
-        
+
         // Main Table Body (Professional ERD look)
         const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
         rect.setAttribute("x", -w/2); rect.setAttribute("y", -h/2);
         rect.setAttribute("width", w); rect.setAttribute("height", h);
         rect.setAttribute("class", "table-node");
         rect.setAttribute("rx", 6);
-        
+
         // Distinct Colored Header Bar
         const header = document.createElementNS("http://www.w3.org/2000/svg", "rect");
         header.setAttribute("x", -w/2); header.setAttribute("y", -h/2);
@@ -183,14 +200,14 @@ function initTopology() {
             t.setAttribute("x", -w/2 + 16);
             t.setAttribute("y", -h/2 + headerH + 20 + (idx * rowH));
             t.setAttribute("class", "column-text");
-            
+
             if (col.includes('(PK)')) {
                 t.style.fill = 'var(--primary)';
                 t.style.fontWeight = 'bold';
             } else if (col.includes('(FK)')) {
                 t.style.fill = 'var(--warning)';
             }
-            
+
             t.textContent = `> ${col}`;
             g.appendChild(t);
         });
@@ -212,7 +229,7 @@ function animatePulse(sourceId, targetId, mode = 'active') {
     const length = originalPath.getTotalLength();
     pulse.style.strokeDasharray = mode === 'active' ? `50, ${length}` : `0, ${length}`;
     viewport.appendChild(pulse);
-    
+
     setTimeout(() => {
         pulse.remove();
         if (mode === 'active') {
@@ -230,131 +247,101 @@ function pulseNode(tableId) {
     }
 }
 
-const EXECUTION_STEPS = [
-    { delay: 0, trace: "[0ms] Parsing query using zero-copy <span class='hl-keyword'>std::string_view</span>..." },
-    { delay: 300, trace: "[300ms] B+ Tree Traversal: Acquiring shared_mutex via <span class='hl-latch'>Latch Crabbing</span>..." },
-    { delay: 600, trace: "[600ms] Buffer Pool: Cache Miss. <span class='hl-replacer'>Clock Replacer</span> evicting Frame ${frame}..." },
-    { delay: 1000, trace: "[1000ms] Disk Manager: Executing <span class='hl-keyword'>fsync()</span> for Write-Ahead Log..." },
-    { delay: 1300, trace: "[1300ms] QUERY SUCCESS: 1 row affected." }
+const ILLUSTRATIVE_TRACE = [
+    "Illustrative trace: no engine request was sent.",
+    "The parser, index, buffer, and schema visuals are examples only.",
+    "Switch to Live Engine to submit this command to /api/query."
 ];
 
 async function runSQLSimulation(query) {
     if (state.isExecuting) return;
     state.isExecuting = true;
-    
-    const isWrite = /INSERT|UPDATE|DELETE/i.test(query);
-    const isCacheMiss = Math.random() > 0.7;
-    
     const sqlInput = document.getElementById('sqlInput');
     sqlInput.disabled = true;
     const tbody = document.getElementById('queryLogBody');
     const timestamp = new Date().toLocaleTimeString('en-GB', { hour12: false });
-    const evictFrame = Math.floor(Math.random() * CONFIG.TOTAL_FRAMES);
     const row = document.createElement('tr');
     row.className = 'new-row';
-    row.innerHTML = `<td class="timestamp-cell">${timestamp}</td><td class="command-cell">${query.toUpperCase()}</td><td class="execution-trace-cell"></td><td class="latency-cell">--</td>`;
+    const timestampCell = document.createElement('td');
+    timestampCell.className = 'timestamp-cell';
+    timestampCell.textContent = timestamp;
+    const commandCell = document.createElement('td');
+    commandCell.className = 'command-cell';
+    commandCell.textContent = query.toUpperCase();
+    const traceCell = document.createElement('td');
+    traceCell.className = 'execution-trace-cell';
+    const latencyCell = document.createElement('td');
+    latencyCell.className = 'latency-cell';
+    latencyCell.textContent = '—';
+    row.append(timestampCell, commandCell, traceCell, latencyCell);
     tbody.prepend(row);
     if (tbody.children.length > 50) tbody.lastElementChild.remove();
-    const traceCell = row.querySelector('.execution-trace-cell');
-    const latencyCell = row.querySelector('.latency-cell');
-    const tablesInQuery = CONFIG.TABLES.filter(t => query.toUpperCase().includes(t.id.toUpperCase()));
 
-    // If not in simulation mode, actually hit the backend
-    let backendResult = null;
-    if (!state.isSimulationMode) {
-        fetch(API_BASE_URL + '/api/query', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: query })
-        })
-        .then(res => res.json())
-        .then(data => { backendResult = data.result; })
-        .catch(err => console.error("Query failed:", err));
-    }
-
-    for (let i = 0; i < EXECUTION_STEPS.length; i++) {
-        if (i === 3 && !isWrite) continue;
-        await new Promise(resolve => setTimeout(resolve, i === 0 ? 0 : 400));
-        
-        let msg = EXECUTION_STEPS[i].trace.replace('${frame}', evictFrame);
-        if (i === 2 && !isCacheMiss) {
-            msg = "[600ms] Buffer Pool: <span class='hl-keyword'>Cache Hit</span>. Directly accessing Page on Frame ${frame}...".replace('${frame}', evictFrame);
-        }
-        
-        // Pipeline Synchronization
-        if (i === 0) activatePipelineNode('pipe-parser');
-        if (i === 1) activatePipelineNode('pipe-index');
-        if (i === 2) {
-            activatePipelineNode('pipe-buffer');
+    try {
+        if (state.isSimulationMode) {
+            for (const message of ILLUSTRATIVE_TRACE) {
+                const line = document.createElement('div');
+                line.textContent = message;
+                traceCell.appendChild(line);
+            }
             simulateBufferPoolActivity();
+        } else {
+            const response = await fetch(API_BASE_URL + '/api/query', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query })
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            traceCell.textContent = data.result;
         }
-        if (i === 3) activatePipelineNode('pipe-disk');
-
-        // At the last step, show real backend result if available
-        if (i === EXECUTION_STEPS.length - 1 && backendResult) {
-            msg = `[1300ms] ENGINE RESPONSE: ${backendResult}`;
-        }
-
-        const line = document.createElement('div');
-        line.innerHTML = msg;
-        traceCell.appendChild(line);
-        
-        if (i === 1 && tablesInQuery.length >= 2) {
-            animatePulse(tablesInQuery[0].id, tablesInQuery[1].id, 'active');
-        } else if (i === 1 && tablesInQuery.length === 1) {
-            pulseNode(tablesInQuery[0].id);
-        }
-        
-        latencyCell.textContent = `${(i * 300 + Math.random() * 50).toFixed(0)}ms`;
+    } catch (error) {
+        console.error("Query request failed:", error);
+        traceCell.textContent = `Request failed: ${error.message}`;
+    } finally {
+        state.isExecuting = false;
+        sqlInput.disabled = false;
+        sqlInput.focus();
     }
-    state.isExecuting = false;
-    sqlInput.disabled = false;
-    sqlInput.focus();
 }
 
 async function updateTelemetry() {
-    if (state.isExecuting) return;
-    
-    try {
-        const response = await fetch(API_BASE_URL + CONFIG.BACKEND_URL);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        
-        const data = await response.json();
-        
-        state.metrics.cacheHitRate = data.cache_hit_rate;
-        state.metrics.queryThroughput = data.query_throughput;
-        state.metrics.ioLatency = data.avg_io_latency;
-        state.metrics.activeLatches = data.active_latches;
-        
-        renderMetrics();
-    } catch (error) {
-        console.error("Backend connection failed: ", error);
-        if (!state.isSimulationMode) {
-            alert("Live Engine disconnected or unreachable. Reverting to Simulation Mode.");
-            toggleMode(); // Revert to simulation
-        }
-        throw error; // Rethrow for toggleMode catch block
+    const response = await fetch(API_BASE_URL + CONFIG.BACKEND_URL);
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
     }
+    const data = await response.json();
+    if (data.source !== 'synthetic_workload') {
+        throw new Error('Metrics response has an unknown source.');
+    }
+
+    state.metrics.cacheHitRate = data.cache_hit_rate;
+    state.metrics.queryThroughput = data.query_throughput;
+    state.metrics.avgLatency = data.avg_latency;
+    state.metrics.errorCount = data.error_count;
+    renderMetrics();
 }
 
 function runTelemetrySimulation() {
-    state.metrics.cacheHitRate = 88 + Math.random() * 7;
-    state.metrics.queryThroughput = 45 + Math.random() * 50;
-    state.metrics.ioLatency = 3 + Math.random() * 10;
-    state.metrics.activeLatches = Math.floor(Math.random() * 4);
+    state.metrics.cacheHitRate = null;
+    state.metrics.queryThroughput = null;
+    state.metrics.avgLatency = null;
+    state.metrics.errorCount = null;
     renderMetrics();
 }
 
 function renderMetrics() {
-    const ids = ['cacheHitRate', 'queryThroughput', 'ioLatency', 'activeLatches'];
-    ids.forEach(id => {
-        const el = document.getElementById(id);
-        if (!el) return;
-        if (id === 'cacheHitRate') el.textContent = `${state.metrics[id].toFixed(2)}%`;
-        else if (id === 'queryThroughput') el.textContent = state.metrics[id].toFixed(1);
-        else if (id === 'ioLatency') el.textContent = `${state.metrics[id].toFixed(1)}ms`;
-        else el.textContent = state.metrics[id];
-    });
+    const { cacheHitRate, queryThroughput, avgLatency, errorCount } = state.metrics;
+    document.getElementById('cacheHitRate').textContent =
+        cacheHitRate === null ? '—' : `${cacheHitRate.toFixed(2)}%`;
+    document.getElementById('queryThroughput').textContent =
+        queryThroughput === null ? '—' : queryThroughput.toFixed(1);
+    document.getElementById('avgLatency').textContent =
+        avgLatency === null ? '—' : `${avgLatency.toFixed(1)}ms`;
+    document.getElementById('errorCount').textContent =
+        errorCount === null ? '—' : errorCount;
 }
 
 function initBufferPool() {
@@ -378,22 +365,19 @@ function updateFrameUI(idx) {
 }
 
 function simulateBufferPoolActivity() {
-    const numPins = 3 + Math.floor(Math.random() * 3);
     const affected = [];
-    for (let i = 0; i < numPins; i++) {
-        const idx = Math.floor(Math.random() * CONFIG.TOTAL_FRAMES);
+    for (let i = 0; i < 4; i++) {
+        const idx = (state.nextSimulationFrame + i) % CONFIG.TOTAL_FRAMES;
         state.pinnedFrames.add(idx);
         affected.push(idx);
         updateFrameUI(idx);
     }
-    const pinCountEl = document.getElementById('pinCount');
-    if (pinCountEl) pinCountEl.textContent = `${state.pinnedFrames.size}/50 frames pinned`;
+    state.nextSimulationFrame = (state.nextSimulationFrame + affected.length) % CONFIG.TOTAL_FRAMES;
     setTimeout(() => {
         affected.forEach(idx => {
             state.pinnedFrames.delete(idx);
             updateFrameUI(idx);
         });
-        if (pinCountEl) pinCountEl.textContent = `${state.pinnedFrames.size}/50 frames pinned`;
     }, 1500);
 }
 
@@ -417,7 +401,6 @@ document.addEventListener('DOMContentLoaded', () => {
         modeToggleBtn.addEventListener('click', toggleMode);
     }
 
-    // Start in Simulation Mode
-    state.isSimulationMode = false; // Set to false so toggleMode() switches it to true
-    toggleMode();
+    renderMode();
+    runTelemetrySimulation();
 });
