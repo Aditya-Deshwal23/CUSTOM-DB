@@ -80,7 +80,14 @@ int main() {
     std::cout << "Selected DB_PATH: " << db_path << std::endl;
     std::cout << "Dashboard static path: " << dashboard_path << std::endl;
 
-    auto disk_manager = std::make_shared<DiskManager>(db_path);
+    std::shared_ptr<DiskManager> disk_manager;
+    try {
+        disk_manager = std::make_shared<DiskManager>(db_path);
+    } catch (const std::exception& ex) {
+        std::cerr << "Failed to initialize database at '" << db_path << "': " << ex.what()
+                  << std::endl;
+        return 1;
+    }
     auto bpm = std::make_shared<BufferPoolManager>(50, disk_manager);
     auto executor = std::make_shared<Executor>(bpm);
     auto api_server = std::make_shared<ApiServer>(bpm, disk_manager, executor, dashboard_path);

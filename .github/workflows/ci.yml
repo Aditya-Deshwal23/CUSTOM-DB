@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+    env:
+      CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+      CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DRELDB_WERROR=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Check metrics honesty
+        run: build/reldb_regression_tests --gtest_also_run_disabled_tests --gtest_filter=MetricsTest.DISABLED_NoFabricatedValues
+      - name: Verify HTTP examples and shutdown
+        run: scripts/verify_resume_claims.sh
+      - name: Print known-bug table
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: scripts/run_known_bugs.sh build/reldb_regression_tests
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.compiler }}-${{ matrix.build_type }}
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTestsFailed.log
+            build/server.log
+          if-no-files-found: ignore
+
+  asan-ubsan:
+    name: Address and undefined behavior sanitizers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=address -DRELDB_WERROR=ON
+      - name: Build
+        run: cmake --build build-asan --parallel
+      - name: Test
+        run: ctest --test-dir build-asan --output-on-failure
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-asan-ubsan
+          path: build-asan/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  tsan:
+    name: Thread sanitizer known-bug stress
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=thread -DRELDB_WERROR=ON
+      - name: Build
+        run: cmake --build build-tsan --parallel
+      - name: Run TSan regression
+        shell: bash
+        run: |
+          sudo sysctl vm.mmap_rnd_bits=28
+          GTEST_FILTER='ConcurrencyTest.DISABLED_ReaderWriterTsanClean' scripts/run_known_bugs.sh build-tsan/reldb_regression_tests | tee tsan.log
+          grep -q 'ThreadSanitizer: data race' tsan.log
+      - name: Upload TSan log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-tsan
+          path: tsan.log
+          if-no-files-found: ignore
+
+  formatting-and-lint:
+    name: Formatting and Dockerfile lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - name: Check changed C++ formatting
+        run: |
+          git fetch origin "${GITHUB_BASE_REF:-main}" --depth=1
+          FORMAT_BASE="origin/${GITHUB_BASE_REF:-main}" scripts/format.sh --check
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  docker-build:
+    name: Docker image build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image without pushing
+        run: docker build --tag custom-db:ci .
