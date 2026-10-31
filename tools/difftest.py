@@ -94,6 +94,8 @@ class Engine:
                 "PORT": str(port),
                 "DURABILITY": "off",
                 "ALLOW_UNSAFE": "1",
+                "RATE_LIMIT_RPS": "100000",
+                "RATE_LIMIT_BURST": "100000",
             }
         )
         self.process = subprocess.Popen(

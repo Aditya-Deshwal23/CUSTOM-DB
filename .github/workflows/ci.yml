@@ -117,7 +117,7 @@ jobs:
             echo
             echo "Target: at least 80% line coverage for each listed component."
             echo "This report publishes measured coverage; the target is not asserted until the baseline meets it."
-            echo "gcovr warns and continues for GCC's negative branch-hit bug; branch data can be incomplete for affected files."
+            echo "gcovr warns and skips negative/suspicious hit counts caused by GCC bug 68080; coverage data for affected lines and branches can be incomplete."
             for component in storage index wal sql; do
               case "${component}" in
                 storage) filter='src/storage/.*|src/slotted_page\.cpp' ;;
@@ -127,10 +127,12 @@ jobs:
               esac
               gcovr --root . --filter "${filter}" \
                 --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+                --gcov-ignore-parse-errors=suspicious_hits.warn_once_per_file \
                 --txt-summary \
                 > "coverage/${component}-summary.txt"
               gcovr --root . --filter "${filter}" \
                 --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+                --gcov-ignore-parse-errors=suspicious_hits.warn_once_per_file \
                 --html-details "coverage/${component}.html"
               echo "## ${component}"
               echo '```text'

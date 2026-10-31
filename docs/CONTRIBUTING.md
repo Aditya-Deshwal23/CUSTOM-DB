@@ -32,10 +32,10 @@ and `src/catalog.cpp` (index), `src/wal.cpp` and `src/crc32c.cpp` (WAL), and
 `src/sql_parser.cpp`, `src/sql_executor.cpp`, and `src/executor.cpp` (SQL).
 The project target is at least 80% line coverage in each group. CI publishes
 measured reports but does not claim the target is met until a run demonstrates
-it. GCC's gcov can emit negative branch-hit counts (GCC bug 68080); the workflow
-uses gcovr's warning mode for that parser issue. Warnings remain visible, and
-branch data may be incomplete for affected files; no branch-coverage threshold
-is claimed.
+it. GCC's gcov can emit negative or suspicious hit counts (GCC bug 68080); the
+workflow uses gcovr's per-file warning mode to skip those parse errors.
+Warnings remain visible, and coverage data for affected lines and branches may
+be incomplete; no branch-coverage threshold is claimed.
 
 ## Change expectations
 
