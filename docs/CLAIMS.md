@@ -51,6 +51,9 @@
 | SQL statement writes roll back completely on failure, and reads share the statement gate while DDL/DML take it exclusively | verified | `SqlExecutionTest.FailedMultiRowInsertRollsBackEveryRow`; `SqlExecutionTest.FailedUpdateRollsBackEarlierRowsAndIndexes`; `ConcurrencyTest.SqlExecutorStatementGateTsanStress`; CI TSan job |
 | The supported SQL subset differentially matches SQLite over 10,000 seeded operations | verified | `.github/workflows/ci.yml` runs `tools/difftest.py --statements 10000`; deliberate comparison limits are documented in `docs/SQL_EXECUTION.md` |
 | SQL point select, 100-row range select, insert, update, and full-scan aggregate workloads are benchmarked at 10k/100k/1M rows | verified | `reldb_sql_execution_benchmarks`; `docs/benchmarks.md` |
+| B+ tree delete latency is benchmarked at 10k/100k/1M keys with successful deletes | verified | `BM_BPlusTreeDeleteWarm` in `bench/b_plus_tree_bench.cpp`; `docs/benchmarks.md` |
+| SQL lexer and parser latency are benchmarked independently | verified | `reldb_sql_parse_benchmarks`; `docs/benchmarks.md` |
+| Seeded in-process YCSB-style A/B/C/E workloads report latency percentiles, throughput, and buffer-pool hit rate | verified | `reldb_ycsb_benchmarks`; `docs/benchmarks.md` |
 | Direct unsynchronized TableHeap access is safe for concurrent readers/writers | removed | `docs/CONCURRENCY.md`; the SQL executor gate, not TableHeap itself, serializes writes against readers |
 | SQL lexer token text is source-backed and zero-copy | verified | `SqlLexerTest.*` and `SqlParserTest.*` in `tests/sql_parser_test.cpp` |
 | The B+ tree uses latch crabbing | removed | `docs/CONCURRENCY.md`; writers are serialized by the caller's statement gate |

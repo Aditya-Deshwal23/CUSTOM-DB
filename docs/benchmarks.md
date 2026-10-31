@@ -130,6 +130,12 @@ The split regression also reports its leaf fill factors: ascending insertions
 reached 89.48% at 40,000 keys; seeded random insertion reached 70.87% at
 200,000 keys. These are regression observations, not timing guarantees.
 
+The same Google Benchmark target includes a warm delete benchmark. It deletes
+keys once in ascending order and refills the tree with timing paused before
+reusing the key range, so each timed operation is a successful delete. Run it
+with the command above and a filter such as
+`--benchmark_filter='BM_BPlusTreeDeleteWarm/10000$'`.
+
 ## WAL commit and checkpoint workloads
 
 `bench/wal_bench.cpp` measures one transaction inserting four distinct B+ tree
@@ -180,6 +186,35 @@ Command:
 
 The target prints the exact per-scale results on the host where it is run.
 Local results are observations, not CI performance gates.
+
+`bench/sql_parse_bench.cpp` separately measures tokenization and parsing of a
+fixed representative SELECT statement. The token source is held constant and
+the benchmark consumes the resulting tokens/AST to prevent dead-code
+elimination.
+
+Command:
+
+```sh
+./build-release/reldb_sql_parse_benchmarks --benchmark_min_time=1s
+```
+
+`bench/ycsb_bench.cpp` runs seeded in-process YCSB-style SQL workloads against
+100,000 through 1,000,000 rows. A is 50/50 read/update, B is 95/5, C is
+read-only, and E issues short (up to 10-row) range scans. Uniform keys use a
+uniform integer distribution; Zipfian keys use a precomputed rank CDF with
+exponent 0.99. Each invocation accepts a durability mode (`full` or `normal`),
+1/2/4/8 worker threads, a frame count, and warm or cold buffer-pool state.
+Cold means the pool is reopened after setup and flush; it does not evict the
+operating-system file cache. The CSV row reports achieved operation count,
+throughput, p50/p95/p99 statement latency, buffer-pool hit rate, and the seed.
+
+Example:
+
+```sh
+./build-release/reldb_ycsb_benchmarks --workload A --distribution zipfian \
+  --records 100000 --operations 100000 --threads 4 --durability full \
+  --cache warm --frames 256 --seed 1337
+```
 
 ## Statement concurrency
 

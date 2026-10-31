@@ -138,6 +138,29 @@ void BM_BPlusTreeInsertCold(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations());
 }
 
+void BM_BPlusTreeDeleteWarm(benchmark::State& state) {
+    std::unique_ptr<Dataset> dataset;
+    int32_t next_key = 0;
+    for (auto _ : state) {
+        if (!dataset) {
+            state.PauseTiming();
+            dataset = BuildDataset(static_cast<int32_t>(state.range(0)));
+            state.ResumeTiming();
+        }
+        if (next_key == dataset->key_count) {
+            state.PauseTiming();
+            for (int32_t key = 0; key < dataset->key_count; ++key) {
+                dataset->tree->Insert(relational_db::EncodeIndexKey(key),
+                                      static_cast<uint64_t>(key));
+            }
+            next_key = 0;
+            state.ResumeTiming();
+        }
+        benchmark::DoNotOptimize(dataset->tree->Delete(relational_db::EncodeIndexKey(next_key++)));
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+
 void BM_BPlusTreeRangeWarm(benchmark::State& state) {
     std::unique_ptr<Dataset> dataset;
     int64_t operation_index = 0;
@@ -187,6 +210,7 @@ BENCHMARK(BM_BPlusTreePointWarm)->Arg(10000)->Arg(100000)->Arg(1000000);
 BENCHMARK(BM_BPlusTreePointCold)->Arg(10000)->Arg(100000)->Arg(1000000);
 BENCHMARK(BM_BPlusTreeInsertWarm)->Arg(10000)->Arg(100000)->Arg(1000000);
 BENCHMARK(BM_BPlusTreeInsertCold)->Arg(10000)->Arg(100000)->Arg(1000000);
+BENCHMARK(BM_BPlusTreeDeleteWarm)->Arg(10000)->Arg(100000)->Arg(1000000);
 BENCHMARK(BM_BPlusTreeRangeWarm)->Arg(10000)->Arg(100000)->Arg(1000000);
 BENCHMARK(BM_BPlusTreeRangeCold)->Arg(10000)->Arg(100000)->Arg(1000000);
 
