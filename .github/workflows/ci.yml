@@ -110,12 +110,14 @@ jobs:
           ctest --test-dir build-coverage --output-on-failure
       - name: Generate gcovr reports for storage, index, WAL, and SQL
         run: |
+          set -euo pipefail
           mkdir -p coverage
           {
             echo "# Line coverage by component"
             echo
             echo "Target: at least 80% line coverage for each listed component."
             echo "This report publishes measured coverage; the target is not asserted until the baseline meets it."
+            echo "gcovr warns and continues for GCC's negative branch-hit bug; branch data can be incomplete for affected files."
             for component in storage index wal sql; do
               case "${component}" in
                 storage) filter='src/storage/.*|src/slotted_page\.cpp' ;;
@@ -123,9 +125,12 @@ jobs:
                 wal) filter='src/wal\.cpp|src/crc32c\.cpp' ;;
                 sql) filter='src/sql_parser\.cpp|src/sql_executor\.cpp|src/executor\.cpp' ;;
               esac
-              gcovr --root . --filter "${filter}" --txt-summary \
+              gcovr --root . --filter "${filter}" \
+                --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+                --txt-summary \
                 > "coverage/${component}-summary.txt"
               gcovr --root . --filter "${filter}" \
+                --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
                 --html-details "coverage/${component}.html"
               echo "## ${component}"
               echo '```text'
@@ -252,6 +257,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image without pushing
         run: docker build --tag custom-db:ci --build-arg VERSION=ci --build-arg VCS_REF=${GITHUB_SHA} .
+      - name: Record built image size
+        run: |
+          docker image ls --no-trunc --filter reference=custom-db:ci | tee image-size.txt
+          cat image-size.txt >> "${GITHUB_STEP_SUMMARY}"
       - name: Run the README quickstart against the built image
         env:
           IMAGE: custom-db:ci

@@ -61,6 +61,23 @@ CPU-frequency and thread-affinity metadata were unavailable; rerun the command
 on the target filesystem for comparable measurements. Every reported page
 operation transfers a 4096-byte on-disk image, including its 16-byte header.
 
+## Container image size
+
+On the local Docker Desktop `linux/arm64` builder, `docker image ls` reported
+146 MB for the pre-packaging `custom-db:before` image and 56.9 MB for
+`custom-db:release-size-check`, built from the current pinned multi-stage
+Dockerfile. That is a 61% reduction in the CLI-reported image size. Rebuild and
+measure the current image with:
+
+```sh
+docker build -t custom-db:release-size-check .
+docker image ls --no-trunc --filter reference=custom-db:release-size-check
+```
+
+The before value is a historical local baseline; the Docker CI job records the
+current build's measured size in its run summary. Image sizes can vary by
+architecture and Docker version.
+
 ## Buffer-pool measurements
 
 `bench/bench_buffer_pool.cpp` measures cached hit latency, a sequential miss
