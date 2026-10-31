@@ -9,6 +9,7 @@
 
 #include "b_plus_tree.h"
 #include "concurrency.h"
+#include "sql_executor.h"
 #include "storage/table_heap.h"
 #include "storage/value.h"
 
@@ -30,6 +31,10 @@ class Executor {
      * Backported to use std::string for compatibility.
      */
     std::string ExecuteQuery(const std::string& query);
+    SqlExecutionResult ExecuteResult(const std::string& query, std::chrono::milliseconds timeout,
+                                     uint64_t max_rows = MAX_RESULT_ROWS);
+    std::vector<SqlTableMetadata> GetTables();
+    std::optional<SqlTableMetadata> GetTable(std::string_view name);
 
     std::vector<Row> ScanWithPredicate(int start_key, int end_key, Predicate pred);
     std::optional<std::string> IntegrityCheck();

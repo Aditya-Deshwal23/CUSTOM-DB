@@ -1,0 +1,313 @@
+openapi: 3.1.0
+info:
+  title: Custom DB API
+  version: 1.0.0
+  description: HTTP API for the Custom DB SQL engine.
+servers:
+  - url: /
+paths:
+  /healthz:
+    get:
+      operationId: liveness
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    const: true
+  /readyz:
+    get:
+      operationId: readiness
+      responses:
+        "200":
+          description: Recovery has completed and the database is writable.
+        "503":
+          description: Database is recovering or the service is draining.
+  /api/v1/query:
+    post:
+      operationId: executeQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+            examples:
+              parameterizedSelect:
+                summary: Parameterized SQL query
+                value:
+                  sql: "SELECT id FROM documented WHERE id = $1"
+                  params: [31]
+              legacyQueryField:
+                summary: Deprecated query field compatibility
+                value:
+                  query: "SELECT id FROM documented WHERE id = 31"
+      responses:
+        "200":
+          description: Query result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuerySuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+        "413":
+          $ref: "#/components/responses/ApiError"
+        "415":
+          $ref: "#/components/responses/ApiError"
+        "422":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "503":
+          $ref: "#/components/responses/ApiError"
+        "507":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/tables:
+    get:
+      operationId: listTables
+      responses:
+        "200":
+          description: Database table names.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tables]
+                properties:
+                  tables:
+                    type: array
+                    items:
+                      type: string
+  /api/v1/tables/{name}:
+    get:
+      operationId: getTable
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Table schema and observed row count.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, schema, row_estimate, indexes]
+                properties:
+                  name:
+                    type: string
+                  schema:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Column"
+                  row_estimate:
+                    type: integer
+                    minimum: 0
+                  indexes:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, column, unique]
+                      properties:
+                        name:
+                          type: string
+                        column:
+                          type: string
+                        unique:
+                          type: boolean
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/stats:
+    get:
+      operationId: getStats
+      responses:
+        "200":
+          description: Live buffer-pool, disk, and HTTP counters.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buffer_pool:
+                    type: object
+                  disk:
+                    type: object
+  /metrics:
+    get:
+      operationId: prometheusMetrics
+      responses:
+        "200":
+          description: Prometheus text exposition.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/v1/version:
+    get:
+      operationId: getVersion
+      responses:
+        "200":
+          description: Build and on-disk format information.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [git_sha, build_time, format_version]
+                properties:
+                  git_sha:
+                    type: string
+                  build_time:
+                    type: string
+                  format_version:
+                    type: integer
+  /api/v1/admin/checkpoint:
+    post:
+      operationId: checkpoint
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: Checkpoint completed.
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "503":
+          $ref: "#/components/responses/ApiError"
+  /health:
+    get:
+      deprecated: true
+      responses:
+        "200":
+          description: Deprecated liveness alias.
+  /api/metrics:
+    get:
+      deprecated: true
+      responses:
+        "200":
+          description: Deprecated JSON metrics alias.
+  /api/query:
+    post:
+      deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+      responses:
+        "200":
+          description: Deprecated query response shape.
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    QueryRequest:
+      type: object
+      properties:
+        sql:
+          type: string
+          maxLength: 16384
+        query:
+          type: string
+          deprecated: true
+        params:
+          type: array
+          items:
+            type: [string, integer, number, boolean, "null"]
+      oneOf:
+        - required: [sql]
+        - required: [query]
+    Column:
+      type: object
+      required: [name, type]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+    QuerySuccess:
+      type: object
+      required:
+        - ok
+        - statement
+        - columns
+        - rows
+        - row_count
+        - rows_affected
+        - truncated
+        - elapsed_us
+      properties:
+        ok:
+          const: true
+        statement:
+          type: string
+        columns:
+          type: array
+          items:
+            $ref: "#/components/schemas/Column"
+        rows:
+          type: array
+          items:
+            type: array
+            items:
+              type: [string, integer, number, boolean, "null"]
+        row_count:
+          type: integer
+          minimum: 0
+        rows_affected:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        elapsed_us:
+          type: integer
+          minimum: 0
+        plan:
+          type: string
+        deprecated:
+          type: boolean
+  responses:
+    ApiError:
+      description: Structured API error; internal failures never include stack traces.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok, error, request_id]
+            properties:
+              ok:
+                const: false
+              error:
+                type: object
+                required: [code, message, line, column, hint]
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  line:
+                    type: integer
+                    minimum: 0
+                  column:
+                    type: integer
+                    minimum: 0
+                  hint:
+                    type: string
+              request_id:
+                type: string

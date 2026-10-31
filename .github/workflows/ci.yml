@@ -40,6 +40,22 @@ jobs:
         run: cmake --build build --target reldb_sql_execution_benchmarks --parallel
       - name: Verify HTTP examples and shutdown
         run: scripts/verify_resume_claims.sh
+      - name: Set up Python for API contract tests
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install API test dependencies
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: python -m pip install -r tests/api/requirements.txt
+      - name: Run real-binary API contract tests
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        env:
+          RELDB_SERVER_BINARY: ${{ github.workspace }}/build/relational_db
+        run: python -m pytest -q tests/api
+      - name: Fuzz HTTP API input (200 seeded requests)
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: python tests/api/fuzz_api.py --binary build/relational_db --iterations 200 --seed 731291
       - name: Print known-bug table
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         run: scripts/run_known_bugs.sh build/reldb_regression_tests
@@ -65,6 +81,18 @@ jobs:
         run: cmake --build build-asan --parallel
       - name: Test
         run: ctest --test-dir build-asan --output-on-failure
+      - name: Set up Python for ASan API tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install API test dependencies
+        run: python -m pip install -r tests/api/requirements.txt
+      - name: Run API contract tests with ASan and UBSan binary
+        env:
+          RELDB_SERVER_BINARY: ${{ github.workspace }}/build-asan/relational_db
+        run: python -m pytest -q tests/api
+      - name: Fuzz API with ASan and UBSan (200 seeded requests)
+        run: python tests/api/fuzz_api.py --binary build-asan/relational_db --iterations 200 --seed 731291
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -95,6 +123,8 @@ jobs:
           RELDB_CONCURRENCY_STRESS_SECONDS=10 build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress | tee -a tsan.log
       - name: Run WAL timer TSan stress
         run: build-tsan/reldb_regression_tests --gtest_filter=WalTest.NormalModeSyncThreadTsanClean
+      - name: Fuzz API middleware concurrently under TSan (200 seeded requests)
+        run: python3 tests/api/fuzz_api.py --binary build-tsan/relational_db --iterations 200 --seed 731291 --concurrent
       - name: Upload TSan log on failure
         if: failure()
         uses: actions/upload-artifact@v4

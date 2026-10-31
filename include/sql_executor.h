@@ -40,6 +40,28 @@ struct ExecutionContext {
     OperatorStatsSink* stats{nullptr};
 };
 
+struct SqlExecutionResult {
+    std::string statement;
+    std::vector<Column> columns;
+    std::vector<std::string> column_names;
+    std::vector<Row> rows;
+    uint64_t rows_affected{0};
+    std::string plan;
+};
+
+struct SqlIndexMetadata {
+    std::string name;
+    std::string column;
+    bool unique{false};
+};
+
+struct SqlTableMetadata {
+    std::string name;
+    Schema schema;
+    uint64_t row_estimate{0};
+    std::vector<SqlIndexMetadata> indexes;
+};
+
 class VolcanoOperator {
    public:
     explicit VolcanoOperator(ExecutionContext& context);
@@ -68,7 +90,13 @@ class SqlExecutionEngine {
     SqlExecutionEngine(const SqlExecutionEngine&) = delete;
     SqlExecutionEngine& operator=(const SqlExecutionEngine&) = delete;
 
-    std::string Execute(std::string_view query);
+    std::string Execute(
+        std::string_view query,
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(STATEMENT_GATE_TIMEOUT_MS));
+    SqlExecutionResult ExecuteResult(std::string_view query, std::chrono::milliseconds timeout,
+                                     uint64_t max_rows);
+    std::vector<SqlTableMetadata> GetTables();
+    std::optional<SqlTableMetadata> GetTable(std::string_view name);
 
    private:
     class Impl;

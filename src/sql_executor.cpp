@@ -704,7 +704,7 @@ Value CoerceValue(Value value, const Column& column) {
             }
             break;
     }
-    throw DbError(ErrorCode::INVALID_ARGUMENT, "Value type does not match column " + column.name);
+    throw DbError(ErrorCode::TYPE_MISMATCH, "Value type does not match column " + column.name);
 }
 
 Schema ProjectionSchema(const std::vector<SqlSelectItem>& items, const Schema& input,
@@ -2293,7 +2293,7 @@ class SqlExecutionEngine::Impl {
           statement_gate_(statement_gate),
           catalog_(buffer_pool_, owner_meta_page_id) {}
 
-    std::string Execute(std::string_view query) {
+    std::string Execute(std::string_view query, std::chrono::milliseconds timeout) {
         SqlStatement statement;
         try {
             statement = SqlParser(query).Parse();
@@ -2301,19 +2301,20 @@ class SqlExecutionEngine::Impl {
             throw DbError(ErrorCode::INVALID_ARGUMENT, error.what());
         }
         if (statement.kind == SqlStatementKind::EXPLAIN) {
-            return ExecuteExplain(statement);
+            return ExecuteExplain(statement, timeout);
         }
         if (statement.kind == SqlStatementKind::SELECT ||
             statement.kind == SqlStatementKind::SHOW_TABLES ||
             statement.kind == SqlStatementKind::DESCRIBE) {
-            StatementScope scope(statement_gate_, false);
+            StatementScope scope(statement_gate_, false,
+                                 std::chrono::steady_clock::now() + timeout);
             std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
             if (statement.kind == SqlStatementKind::SELECT) {
                 return ExecuteSelect(statement, &scope.Cancellation(), nullptr);
             }
             return ExecuteReadMetadata(statement);
         }
-        StatementScope scope(statement_gate_, true);
+        StatementScope scope(statement_gate_, true, std::chrono::steady_clock::now() + timeout);
         std::unique_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
         catalog_.Reload();
         if (statement.kind == SqlStatementKind::CHECKPOINT) {
@@ -2358,7 +2359,131 @@ class SqlExecutionEngine::Impl {
         }
     }
 
+    SqlExecutionResult ExecuteResult(std::string_view query, std::chrono::milliseconds timeout,
+                                     uint64_t max_rows) {
+        SqlStatement statement;
+        try {
+            statement = SqlParser(query).Parse();
+        } catch (const SqlError& error) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT, error.what());
+        }
+
+        SqlExecutionResult result;
+        result.statement = StatementName(statement.kind);
+        if (statement.kind == SqlStatementKind::EXPLAIN) {
+            result.plan = Execute(query, timeout);
+            return result;
+        }
+        if (statement.kind == SqlStatementKind::SELECT) {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            StatementScope scope(statement_gate_, false, deadline);
+            std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+            CatalogTable& table = RequireTable(catalog_, statement.table);
+            ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &scope.Cancellation(),
+                                     nullptr};
+            QueryPlan plan = BuildSelectPlan(context, table, statement);
+            result.columns = plan.output_schema.columns;
+            result.column_names = plan.output_names;
+            result.plan = FormatPlan(plan);
+            Tuple tuple;
+            RID rid{};
+            plan.root->Init();
+            while (plan.root->Next(&tuple, &rid)) {
+                if (result.rows.size() > max_rows) {
+                    break;
+                }
+                result.rows.push_back(DeserializeTuple(plan.output_schema, tuple));
+            }
+            plan.root->Finish();
+            buffer_pool_->AssertNoPinsHeld();
+            return result;
+        }
+
+        const std::string output = Execute(query, timeout);
+        const std::string suffix = " row(s) affected";
+        const size_t marker = output.find(suffix);
+        if (marker != std::string::npos) {
+            const std::string_view number(output.data(), marker);
+            const auto parsed =
+                std::from_chars(number.data(), number.data() + number.size(), result.rows_affected);
+            if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size()) {
+                result.rows_affected = 0;
+            }
+        }
+        return result;
+    }
+
+    std::vector<SqlTableMetadata> GetTables() {
+        StatementScope scope(statement_gate_, false);
+        std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        std::vector<SqlTableMetadata> result;
+        result.reserve(catalog_.Tables().size());
+        for (const auto& entry : catalog_.Tables()) {
+            result.push_back(ReadTableMetadata(*entry));
+        }
+        buffer_pool_->AssertNoPinsHeld();
+        return result;
+    }
+
+    std::optional<SqlTableMetadata> GetTable(std::string_view name) {
+        StatementScope scope(statement_gate_, false);
+        std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        const CatalogTable* table = catalog_.FindTable(name);
+        if (table == nullptr) {
+            return std::nullopt;
+        }
+        SqlTableMetadata result = ReadTableMetadata(*table);
+        buffer_pool_->AssertNoPinsHeld();
+        return result;
+    }
+
    private:
+    static SqlTableMetadata ReadTableMetadata(const CatalogTable& table) {
+        SqlTableMetadata metadata;
+        metadata.name = table.name;
+        metadata.schema = table.schema;
+        metadata.indexes.reserve(table.indexes.size());
+        for (const CatalogIndex& index : table.indexes) {
+            metadata.indexes.push_back(SqlIndexMetadata{
+                index.name, table.schema.columns[index.column].name, index.unique});
+        }
+        TableIterator iterator = table.heap->Begin();
+        RID rid{};
+        Tuple tuple;
+        while (iterator.Next(rid, tuple)) {
+            ++metadata.row_estimate;
+        }
+        return metadata;
+    }
+
+    static std::string StatementName(SqlStatementKind kind) {
+        switch (kind) {
+            case SqlStatementKind::CREATE_TABLE:
+                return "CREATE";
+            case SqlStatementKind::DROP_TABLE:
+                return "DROP";
+            case SqlStatementKind::CREATE_INDEX:
+                return "CREATE";
+            case SqlStatementKind::INSERT:
+                return "INSERT";
+            case SqlStatementKind::SELECT:
+                return "SELECT";
+            case SqlStatementKind::UPDATE:
+                return "UPDATE";
+            case SqlStatementKind::DELETE:
+                return "DELETE";
+            case SqlStatementKind::EXPLAIN:
+                return "EXPLAIN";
+            case SqlStatementKind::SHOW_TABLES:
+                return "SHOW";
+            case SqlStatementKind::DESCRIBE:
+                return "DESCRIBE";
+            case SqlStatementKind::CHECKPOINT:
+                return "CHECKPOINT";
+        }
+        return "UNKNOWN";
+    }
+
     std::string ExecuteReadMetadata(const SqlStatement& statement) {
         if (statement.kind == SqlStatementKind::SHOW_TABLES) {
             std::ostringstream result;
@@ -2468,13 +2593,13 @@ class SqlExecutionEngine::Impl {
         }
     }
 
-    std::string ExecuteExplain(const SqlStatement& statement) {
+    std::string ExecuteExplain(const SqlStatement& statement, std::chrono::milliseconds timeout) {
         if (!statement.explained_statement) {
             throw DbError(ErrorCode::INVALID_ARGUMENT, "EXPLAIN is missing its statement");
         }
         const SqlStatement& explained = *statement.explained_statement;
         const bool write = explained.kind != SqlStatementKind::SELECT;
-        StatementScope scope(statement_gate_, write);
+        StatementScope scope(statement_gate_, write, std::chrono::steady_clock::now() + timeout);
         std::unique_lock<RankedSharedMutex> catalog_write_lock(catalog_gate_, std::defer_lock);
         std::shared_lock<RankedSharedMutex> catalog_read_lock(catalog_gate_, std::defer_lock);
         if (write) {
@@ -2560,8 +2685,22 @@ SqlExecutionEngine::SqlExecutionEngine(std::shared_ptr<BufferPoolManager> buffer
 
 SqlExecutionEngine::~SqlExecutionEngine() = default;
 
-std::string SqlExecutionEngine::Execute(std::string_view query) {
-    return impl_->Execute(query);
+std::string SqlExecutionEngine::Execute(std::string_view query, std::chrono::milliseconds timeout) {
+    return impl_->Execute(query, timeout);
+}
+
+SqlExecutionResult SqlExecutionEngine::ExecuteResult(std::string_view query,
+                                                     std::chrono::milliseconds timeout,
+                                                     uint64_t max_rows) {
+    return impl_->ExecuteResult(query, timeout, max_rows);
+}
+
+std::vector<SqlTableMetadata> SqlExecutionEngine::GetTables() {
+    return impl_->GetTables();
+}
+
+std::optional<SqlTableMetadata> SqlExecutionEngine::GetTable(std::string_view name) {
+    return impl_->GetTable(name);
 }
 
 }  // namespace relational_db

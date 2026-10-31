@@ -94,6 +94,7 @@ class FileDiskManager final : public IDiskManager {
 
     void Open();
     void ValidateHeader();
+    void SetMaxBytes(uint64_t max_bytes) noexcept;
     void ReadPage(page_id_t page_id, char* page_data) override;
     void ReadPage(page_id_t page_id, char* page_data, PageType& type) override;
     void ReadPage(page_id_t page_id, char* page_data, PageType& type, uint16_t& flags,
@@ -124,6 +125,7 @@ class FileDiskManager final : public IDiskManager {
     bool allow_wal_recovery_{false};
     int file_descriptor_{-1};
     std::atomic<uint64_t> page_count_{0};
+    std::atomic<uint64_t> max_bytes_{0};
     mutable RankedMutex open_mutex_{LockRank::DISK_WAL};
     mutable RankedMutex header_mutex_{LockRank::DISK_WAL};
     std::atomic<bool> opened_{false};

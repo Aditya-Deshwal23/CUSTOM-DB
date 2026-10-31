@@ -39,6 +39,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(asio)
 set(ASIO_INCLUDE_DIR "${asio_SOURCE_DIR}/asio/include")
 FetchContent_MakeAvailable(crow)
+include(cmake/patch_crow_options.cmake)
 
 if(RELDB_BUILD_TESTS)
   FetchContent_Declare(
@@ -99,12 +100,34 @@ target_include_directories(reldb_core PUBLIC include)
 target_link_libraries(reldb_core PUBLIC Threads::Threads)
 
 add_executable(relational_db src/main.cpp)
+execute_process(
+  COMMAND git rev-parse --short=12 HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE RELDB_GIT_SHA
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(NOT RELDB_GIT_SHA)
+  set(RELDB_GIT_SHA "unknown")
+endif()
+string(TIMESTAMP RELDB_BUILD_TIME "%Y-%m-%dT%H:%M:%SZ" UTC)
+target_sources(relational_db PRIVATE
+  src/api/server.cpp
+  src/api/routes.cpp
+  src/api/middleware.cpp
+  src/api/json.cpp
+)
 target_include_directories(relational_db PRIVATE include)
 target_include_directories(relational_db SYSTEM PRIVATE
   ${asio_SOURCE_DIR}/asio/include
   ${crow_SOURCE_DIR}/include
 )
-target_compile_definitions(relational_db PRIVATE CROW_STANDALONE ASIO_STANDALONE)
+target_compile_definitions(relational_db PRIVATE
+  CROW_STANDALONE
+  ASIO_STANDALONE
+  RELDB_GIT_SHA="${RELDB_GIT_SHA}"
+  RELDB_BUILD_TIME="${RELDB_BUILD_TIME}"
+)
 target_link_libraries(relational_db PRIVATE reldb_core Threads::Threads)
 if(WIN32)
   target_link_libraries(relational_db PRIVATE ws2_32 mswsock)

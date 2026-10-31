@@ -30,7 +30,8 @@ enum class ErrorCode {
     RESULT_LIMIT_EXCEEDED,
     SORT_LIMIT_EXCEEDED,
     BUSY,
-    IO_ERROR
+    IO_ERROR,
+    STORAGE_QUOTA
 };
 
 class DbError : public std::runtime_error {

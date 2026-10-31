@@ -6,6 +6,17 @@ on:
   workflow_dispatch:
 
 jobs:
+  api-fuzzing:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure API fuzz target
+        run: cmake -S . -B build-api-fuzz -DCMAKE_BUILD_TYPE=Release -DRELDB_BUILD_TESTS=OFF -DRELDB_BUILD_BENCHMARKS=OFF
+      - name: Build API server
+        run: cmake --build build-api-fuzz --parallel --target relational_db
+      - name: Fuzz HTTP API input (5,000 seeded requests)
+        run: python3 tests/api/fuzz_api.py --binary build-api-fuzz/relational_db --iterations 5000 --seed 907213
+
   concurrency-tsan-stress:
     runs-on: ubuntu-24.04
     steps:

@@ -233,6 +233,10 @@ void FileDiskManager::ValidateHeader() {
     ValidateExistingFile();
 }
 
+void FileDiskManager::SetMaxBytes(uint64_t max_bytes) noexcept {
+    max_bytes_.store(max_bytes, std::memory_order_release);
+}
+
 void FileDiskManager::InitializeNewFile() {
     page_count_.store(1, std::memory_order_release);
     GrowPhysicalFile(1);
@@ -560,6 +564,10 @@ void FileDiskManager::WritePageImage(page_id_t page_id, const uint8_t* image) {
     std::lock_guard<RankedMutex> header_lock(header_mutex_);
     const uint64_t required_pages = static_cast<uint64_t>(page_id) + 1U;
     if (required_pages > page_count_.load(std::memory_order_relaxed)) {
+        const uint64_t limit = max_bytes_.load(std::memory_order_acquire);
+        if (limit != 0U && required_pages > limit / PAGE_SIZE) {
+            throw DbError(ErrorCode::STORAGE_QUOTA, "Database storage quota exceeded", page_id);
+        }
         GrowPhysicalFile(required_pages);
     }
     WriteExact(PageOffset(page_id), reinterpret_cast<const char*>(image), PAGE_SIZE);
@@ -608,6 +616,10 @@ void FileDiskManager::Extend(uint64_t page_count) {
         throw DbError(ErrorCode::IO_ERROR, "Requested database page count exceeds page IDs");
     }
     const uint64_t updated = current + page_count;
+    const uint64_t limit = max_bytes_.load(std::memory_order_acquire);
+    if (limit != 0U && updated > limit / PAGE_SIZE) {
+        throw DbError(ErrorCode::STORAGE_QUOTA, "Database storage quota exceeded");
+    }
     GrowPhysicalFile(updated);
     page_count_.store(updated, std::memory_order_release);
     std::array<uint8_t, PAGE_SIZE> image{};
@@ -630,6 +642,10 @@ void FileDiskManager::ReservePages(uint64_t page_count) {
         throw DbError(ErrorCode::IO_ERROR, "Requested database page count exceeds page IDs");
     }
     const uint64_t updated = current + page_count;
+    const uint64_t limit = max_bytes_.load(std::memory_order_acquire);
+    if (limit != 0U && updated > limit / PAGE_SIZE) {
+        throw DbError(ErrorCode::STORAGE_QUOTA, "Database storage quota exceeded");
+    }
     GrowPhysicalFile(updated);
     page_count_.store(updated, std::memory_order_release);
 }

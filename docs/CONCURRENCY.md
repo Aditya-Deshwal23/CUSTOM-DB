@@ -43,6 +43,11 @@ mutex. Disk/WAL I/O entry points also assert that the buffer-pool mutex is not
 held. Equal-rank locks are allowed, but code must not wait for another page
 while retaining a frame latch.
 
+The HTTP API's per-IP token buckets use a separate mutex only while updating
+the bounded in-memory bucket map. Middleware releases it before route handlers
+can enter the statement gate or perform storage I/O. HTTP counters and server
+readiness flags are atomics; no API mutex is nested with the storage lock order.
+
 No disk read, write, extension, or sync occurs under the buffer-pool page-table
 mutex. A fetch reserves and publishes a frame under that mutex, performs disk
 I/O after releasing it, then publishes the ready frame while acquiring the
@@ -113,3 +118,5 @@ tight acquire/release loop and bounds writer wait to two seconds.
 `DiskManagerTest.ConcurrentDistinctPageIo` separately exercise buffer-pool
 and disk-manager concurrency. These tests do not make unsynchronized direct
 `TableHeap` or B+ tree use safe.
+The CI TSan job also sends 200 seeded concurrent malformed/valid HTTP requests
+through the API rate limiter and SQL parser using `tests/api/fuzz_api.py`.

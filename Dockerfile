@@ -15,6 +15,7 @@ RUN apt-get update \
 WORKDIR /src
 
 COPY CMakeLists.txt ./
+COPY cmake ./cmake
 COPY include ./include
 COPY src ./src
 
@@ -42,6 +43,7 @@ COPY dashboard ./dashboard
 
 ENV PORT=8080
 ENV DB_PATH=/data/custom.db
+ENV READ_ONLY=1
 
 EXPOSE 8080
 

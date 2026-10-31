@@ -128,6 +128,21 @@ std::string Executor::ExecuteQuery(const std::string& query) {
     }
 }
 
+SqlExecutionResult Executor::ExecuteResult(const std::string& query,
+                                           std::chrono::milliseconds timeout, uint64_t max_rows) {
+    SqlExecutionResult result = sql_engine_->ExecuteResult(query, timeout, max_rows);
+    bpm_->AssertNoPinsHeld();
+    return result;
+}
+
+std::vector<SqlTableMetadata> Executor::GetTables() {
+    return sql_engine_->GetTables();
+}
+
+std::optional<SqlTableMetadata> Executor::GetTable(std::string_view name) {
+    return sql_engine_->GetTable(name);
+}
+
 std::string Executor::ExecuteLegacyQuery(const std::string& query) {
     const std::vector<SqlToken> tokens = SqlLexer::Tokenize(query);
     const std::string_view command = tokens.size() > 1 ? tokens[0].text : std::string_view{};

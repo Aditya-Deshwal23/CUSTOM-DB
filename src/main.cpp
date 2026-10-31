@@ -1,17 +1,18 @@
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
-#include <chrono>
 #include <thread>
-#include <cstdlib>
-#include <filesystem>
-#include <atomic>
-#include <csignal>
-#include "buffer_pool_manager.h"
-#include "slotted_page.h"
-#include "b_plus_tree.h"
-#include "executor.h"
+
 #include "api_server.h"
+#include "b_plus_tree.h"
+#include "buffer_pool_manager.h"
+#include "executor.h"
+#include "slotted_page.h"
 #include "wal.h"
 
 using namespace relational_db;
@@ -60,21 +61,21 @@ std::string ResolveDashboardPath() {
     return "dashboard";
 }
 
-} // namespace
+}  // namespace
 
 int main() {
     std::signal(SIGINT, HandleShutdownSignal);
     std::signal(SIGTERM, HandleShutdownSignal);
 
-    std::cout << "Custom Relational Storage Engine Initialized (Native UCRT64 Mode)" << std::endl;
+    std::cerr << "Custom Relational Storage Engine Initialized (Native UCRT64 Mode)" << std::endl;
 
     const int port = ReadPortFromEnv();
     const std::string db_path = ReadDbPathFromEnv();
     const std::string dashboard_path = ResolveDashboardPath();
 
-    std::cout << "Selected PORT: " << port << std::endl;
-    std::cout << "Selected DB_PATH: " << db_path << std::endl;
-    std::cout << "Dashboard static path: " << dashboard_path << std::endl;
+    std::cerr << "Selected PORT: " << port << std::endl;
+    std::cerr << "Selected DB_PATH: " << db_path << std::endl;
+    std::cerr << "Dashboard static path: " << dashboard_path << std::endl;
 
     std::shared_ptr<DiskManager> disk_manager;
     std::shared_ptr<WriteAheadLog> wal;
@@ -96,7 +97,13 @@ int main() {
         std::cerr << "Failed to initialize durable executor: " << ex.what() << std::endl;
         return 1;
     }
-    auto api_server = std::make_shared<ApiServer>(bpm, disk_manager, executor, dashboard_path);
+    std::shared_ptr<ApiServer> api_server;
+    try {
+        api_server = std::make_shared<ApiServer>(bpm, disk_manager, executor, dashboard_path);
+    } catch (const std::exception& ex) {
+        std::cerr << "Failed to configure API server: " << ex.what() << std::endl;
+        return 1;
+    }
 
     std::atomic<bool> running{true};
 
@@ -106,13 +113,13 @@ int main() {
         }
 
         if (g_shutdown_requested != 0) {
-            std::cout << "Shutdown signal received, stopping server..." << std::endl;
+            std::cerr << "Shutdown signal received, stopping server..." << std::endl;
             running.store(false);
             api_server->Stop();
         }
     });
 
-    std::cout << "Starting Web Dashboard at http://0.0.0.0:" << port << std::endl;
+    std::cerr << "Starting Web Dashboard at http://0.0.0.0:" << port << std::endl;
     api_server->Run(port);
 
     running.store(false);
@@ -128,6 +135,6 @@ int main() {
         return 1;
     }
 
-    std::cout << "Shutdown complete." << std::endl;
+    std::cerr << "Shutdown complete." << std::endl;
     return 0;
 }
