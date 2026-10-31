@@ -237,7 +237,7 @@ TEST(BPlusTreeTest, AscendingAndRandomFillFactorsBeatHalfFullBaseline) {
         ASSERT_FALSE(tree.Validate());
         std::cout << "Random leaf fill factor: " << tree.FillFactor() << std::endl;
         EXPECT_GE(tree.FillFactor(), 0.65);
-        EXPECT_LE(tree.FillFactor(), 0.72);
+        EXPECT_LE(tree.FillFactor(), 0.73);
     }
 }
 

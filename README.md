@@ -98,7 +98,7 @@ Reproduce with [`tools/benchmark_sqlite.py`](tools/benchmark_sqlite.py); full me
 
 ## Durability demonstration
 
-[`scripts/demo_crash.sh`](scripts/demo_crash.sh) writes through the HTTP API, sends `SIGKILL` during the write loop, restarts on the same named volume, checks recovery and `--check`, verifies every acknowledged row, then checks graceful shutdown. The recorded run recovered all 1,752 acknowledged writes (plus one committed but unacknowledged row); open [`recovery.cast`](docs/assets/recovery.cast) with [asciinema](https://asciinema.org/) or use the [demo walkthrough](docs/DEMO.md). CI runs 200 seeded crash iterations on PR/push; nightly CI runs 5,000.
+[`scripts/demo_crash.sh`](scripts/demo_crash.sh) writes through the HTTP API, sends `SIGKILL` during the write loop, restarts on the same named volume, checks recovery and `--check`, verifies every acknowledged row, then checks graceful shutdown. The recorded run recovered all 1,752 acknowledged writes (plus one committed but unacknowledged row); play [`recovery.cast`](docs/assets/recovery.cast) with an asciinema-compatible player or use the [demo walkthrough](docs/DEMO.md). CI runs 200 seeded crash iterations on PR/push; nightly CI runs 5,000.
 
 ## Docs
 

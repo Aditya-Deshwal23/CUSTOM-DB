@@ -24,12 +24,8 @@ struct ColumnReference {
 
 struct Column {
     Column() = default;
-    Column(std::string column_name, ColumnType column_type = ColumnType::INT,
-           uint16_t length = 0, std::optional<ColumnReference> column_reference = std::nullopt)
-        : name(std::move(column_name)),
-          type(column_type),
-          varchar_length(length),
-          references(std::move(column_reference)) {}
+    Column(std::string column_name, ColumnType column_type = ColumnType::INT, uint16_t length = 0)
+        : name(std::move(column_name)), type(column_type), varchar_length(length) {}
 
     std::string name;
     ColumnType type{ColumnType::INT};

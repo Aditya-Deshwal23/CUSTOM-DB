@@ -31,7 +31,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Fail on high or critical vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: custom-db:release-scan
           format: table
