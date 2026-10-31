@@ -149,10 +149,8 @@ inline uint16_t ReadU16(const uint8_t* bytes) noexcept {
 }
 
 inline uint32_t ReadU32(const uint8_t* bytes) noexcept {
-    return static_cast<uint32_t>(bytes[0]) |
-           (static_cast<uint32_t>(bytes[1]) << 8U) |
-           (static_cast<uint32_t>(bytes[2]) << 16U) |
-           (static_cast<uint32_t>(bytes[3]) << 24U);
+    return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8U) |
+           (static_cast<uint32_t>(bytes[2]) << 16U) | (static_cast<uint32_t>(bytes[3]) << 24U);
 }
 
 inline void WriteU16(uint8_t* bytes, uint16_t value) noexcept {
@@ -186,15 +184,13 @@ class BPlusTree {
         (PAGE_DATA_SIZE - 2U) / (kKeySize + sizeof(page_id_t));
     static constexpr size_t kInternalKeyCapacity = kInternalChildCapacity - 1U;
     using LeafLayout = bpt_detail::LeafPageLayout<kKeySize, kLeafCapacity>;
-    using InternalLayout =
-        bpt_detail::InternalPageLayout<kKeySize, kInternalChildCapacity>;
+    using InternalLayout = bpt_detail::InternalPageLayout<kKeySize, kInternalChildCapacity>;
     using LeafEntry = typename LeafLayout::Entry;
     using InternalEntry = typename InternalLayout::Entry;
     using BytePage = std::array<char, PAGE_DATA_SIZE>;
 
     static_assert(kKeySize > 0 && kKeySize <= 16, "BPlusTree key encoding must fit 16 bytes");
-    static_assert(std::is_same<KeyType, IndexKey16>::value ||
-                      std::is_same<KeyType, bool>::value ||
+    static_assert(std::is_same<KeyType, IndexKey16>::value || std::is_same<KeyType, bool>::value ||
                       (std::is_integral<KeyType>::value &&
                        (sizeof(KeyType) == 4 || sizeof(KeyType) == 8)),
                   "BPlusTree keys must be INT32, INT64, BOOLEAN, or IndexKey16");
@@ -230,7 +226,7 @@ class BPlusTree {
         std::optional<KeyType> maximum;
     };
 
-public:
+   public:
     static constexpr IndexKeyKind DefaultKeyKind() {
         if constexpr (std::is_same<KeyType, bool>::value) {
             return IndexKeyKind::BOOLEAN;
@@ -243,7 +239,7 @@ public:
     }
 
     class Iterator {
-    public:
+       public:
         Iterator() = default;
         Iterator(Iterator&&) noexcept = default;
         Iterator& operator=(Iterator&&) noexcept = default;
@@ -251,30 +247,48 @@ public:
         Iterator& operator=(const Iterator&) = delete;
 
         std::optional<std::pair<KeyType, ValueType>> Next() {
-            while (leaf_guard_) {
-                const auto* leaf = LeafRead(leaf_guard_);
+            while (leaf_page_id_ != INVALID_PAGE_ID) {
+                if (!leaf_loaded_) {
+                    if (!leaf_guard_) {
+                        leaf_guard_ = FetchRead(*buffer_pool_, leaf_page_id_);
+                    }
+                    if (leaf_guard_.GetPageType() != PageType::BTREE_LEAF) {
+                        throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree leaf page",
+                                      leaf_guard_.GetPageId());
+                    }
+                    leaf_data_ = *leaf_guard_.As<BytePage>();
+                    leaf_guard_.Drop();
+                    leaf_loaded_ = true;
+                }
+                const auto* leaf = reinterpret_cast<const LeafLayout*>(leaf_data_.data());
                 const uint16_t count = ReadCount(leaf->count.data());
                 if (index_ < count) {
                     const LeafEntry& entry = leaf->entries[index_++];
                     return std::make_pair(KeyCodec::Decode(entry.key.data()),
                                           ValueCodec::Decode(entry.value.data()));
                 }
-                const page_id_t next = bpt_detail::ReadPageId(leaf->next_page_id.data());
-                leaf_guard_.Drop();
-                if (next == INVALID_PAGE_ID) {
-                    break;
-                }
-                leaf_guard_ = FetchRead(*buffer_pool_, next);
+                leaf_page_id_ = bpt_detail::ReadPageId(leaf->next_page_id.data());
+                leaf_loaded_ = false;
                 index_ = 0;
             }
             return std::nullopt;
         }
 
-    private:
+       private:
         friend class BPlusTree;
         Iterator(std::shared_ptr<BufferPoolManager> buffer_pool, ReadPageGuard guard,
                  uint16_t index)
-            : buffer_pool_(std::move(buffer_pool)), leaf_guard_(std::move(guard)), index_(index) {}
+            : buffer_pool_(std::move(buffer_pool)),
+              leaf_page_id_(guard.GetPageId()),
+              index_(index) {
+            if (guard.GetPageType() != PageType::BTREE_LEAF) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree leaf page",
+                              guard.GetPageId());
+            }
+            leaf_data_ = *guard.As<BytePage>();
+            guard.Drop();
+            leaf_loaded_ = true;
+        }
 
         static const LeafLayout* LeafRead(const ReadPageGuard& guard) {
             if (guard.GetPageType() != PageType::BTREE_LEAF) {
@@ -295,13 +309,15 @@ public:
         }
 
         std::shared_ptr<BufferPoolManager> buffer_pool_;
+        page_id_t leaf_page_id_{INVALID_PAGE_ID};
         ReadPageGuard leaf_guard_;
+        BytePage leaf_data_{};
         uint16_t index_{0};
+        bool leaf_loaded_{false};
     };
 
     explicit BPlusTree(std::shared_ptr<BufferPoolManager> buffer_pool,
-                       const KeyComparator& comparator,
-                       IndexKeyKind key_kind = DefaultKeyKind())
+                       const KeyComparator& comparator, IndexKeyKind key_kind = DefaultKeyKind())
         : buffer_pool_(std::move(buffer_pool)), comparator_(comparator), key_kind_(key_kind) {
         InitializeCatalogMeta();
     }
@@ -451,34 +467,36 @@ public:
             return true;
         }
 
-        std::vector<LeafEntry> entries(leaf->entries.begin(),
-                                       leaf->entries.begin() + old_count);
+        std::vector<LeafEntry> entries(leaf->entries.begin(), leaf->entries.begin() + old_count);
         LeafEntry inserted{};
         WriteLeafEntry(inserted, key, value);
         entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(index), inserted);
+
+        const page_id_t old_next = bpt_detail::ReadPageId(leaf->next_page_id.data());
+        leaf_guard.Drop();
+
+        const bool append_to_rightmost =
+            ascending_inserts_ && index == old_count && old_next == INVALID_PAGE_ID;
+        size_t left_count = append_to_rightmost ? (kLeafCapacity * 9U) / 10U : entries.size() / 2U;
+        left_count = std::max(left_count, static_cast<size_t>(LeafMinimum()));
+        left_count = std::min(left_count, entries.size() - LeafMinimum());
 
         WritePageGuard right_guard = NewPage();
         const page_id_t right_id = right_guard.GetPageId();
         right_guard.SetPageType(PageType::BTREE_LEAF);
         auto* right = LeafWrite(right_guard);
-        const page_id_t old_next = bpt_detail::ReadPageId(leaf->next_page_id.data());
         InitializeLeaf(right, old_next);
-
-        const bool append_to_rightmost =
-            ascending_inserts_ && index == old_count && old_next == INVALID_PAGE_ID;
-        size_t left_count = append_to_rightmost ? (kLeafCapacity * 9U) / 10U
-                                               : entries.size() / 2U;
-        left_count = std::max(left_count, static_cast<size_t>(LeafMinimum()));
-        left_count = std::min(left_count, entries.size() - LeafMinimum());
-        std::copy_n(entries.begin(), left_count, leaf->entries.begin());
         std::copy(entries.begin() + static_cast<std::ptrdiff_t>(left_count), entries.end(),
                   right->entries.begin());
-        WriteCount(leaf->count.data(), static_cast<uint16_t>(left_count));
-        WriteCount(right->count.data(),
-                   static_cast<uint16_t>(entries.size() - left_count));
-        bpt_detail::WritePageId(leaf->next_page_id.data(), right_id);
+        WriteCount(right->count.data(), static_cast<uint16_t>(entries.size() - left_count));
         const KeyType separator = DecodeKey(right->entries[0]);
         right_guard.Drop();
+
+        leaf_guard = FetchWrite(leaf_id);
+        leaf = LeafWrite(leaf_guard);
+        std::copy_n(entries.begin(), left_count, leaf->entries.begin());
+        WriteCount(leaf->count.data(), static_cast<uint16_t>(left_count));
+        bpt_detail::WritePageId(leaf->next_page_id.data(), right_id);
         leaf_guard.Drop();
         InsertIntoParent(path, separator, right_id);
         return true;
@@ -554,17 +572,16 @@ public:
         const page_id_t leaf_id = FindLeaf(key, nullptr);
         ReadPageGuard guard = FetchRead(leaf_id);
         const auto* leaf = LeafRead(guard);
-        return Iterator(buffer_pool_, std::move(guard),
-                        static_cast<uint16_t>(
-                            LeafLowerBound(leaf, ReadCount(leaf->count.data()), key)));
+        return Iterator(
+            buffer_pool_, std::move(guard),
+            static_cast<uint16_t>(LeafLowerBound(leaf, ReadCount(leaf->count.data()), key)));
     }
 
-    std::vector<std::pair<KeyType, ValueType>> RangeScan(
-        const KeyType& low, const KeyType& high, bool include_low = true,
-        bool include_high = false) const {
+    std::vector<std::pair<KeyType, ValueType>> RangeScan(const KeyType& low, const KeyType& high,
+                                                         bool include_low = true,
+                                                         bool include_high = false) const {
         std::vector<std::pair<KeyType, ValueType>> result;
-        if (comparator_(high, low) ||
-            (KeysEqual(low, high) && (!include_low || !include_high))) {
+        if (comparator_(high, low) || (KeysEqual(low, high) && (!include_low || !include_high))) {
             return result;
         }
         Iterator iterator = LowerBound(low);
@@ -572,8 +589,7 @@ public:
             if (comparator_(item->first, low) || (!include_low && KeysEqual(item->first, low))) {
                 continue;
             }
-            if (comparator_(high, item->first) ||
-                (!include_high && KeysEqual(item->first, high))) {
+            if (comparator_(high, item->first) || (!include_high && KeysEqual(item->first, high))) {
                 break;
             }
             result.push_back(*item);
@@ -583,149 +599,160 @@ public:
 
     std::optional<std::string> Validate() const {
         try {
-        if (meta_page_id_ <= 0) {
-            return "INDEX_META page ID is invalid";
-        }
-        if (catalog_root_meta_) {
-            ReadPageGuard header_guard = FetchRead(0);
-            const auto* header = header_guard.As<BytePage>();
-            const page_id_t catalog_root = bpt_detail::ReadPageId(
-                reinterpret_cast<const uint8_t*>(header->data() + 28));
-            if (catalog_root != meta_page_id_) {
-                return "Database header catalog_root does not reference INDEX_META";
+            if (meta_page_id_ <= 0) {
+                return "INDEX_META page ID is invalid";
             }
-        }
-        if ((root_page_id_ == INVALID_PAGE_ID) != (height_ == 0)) {
-            return "INDEX_META root and height disagree";
-        }
-        bpt_detail::IndexMetaLayout stored{};
-        {
-            ReadPageGuard guard = FetchRead(meta_page_id_);
-            std::memcpy(&stored, guard.As<BytePage>()->data(), sizeof(stored));
-        }
-        if (bpt_detail::ReadPageId(stored.root_page_id.data()) != root_page_id_ ||
-            bpt_detail::ReadU16(stored.height.data()) != height_ ||
-            bpt_detail::ReadU16(stored.key_kind.data()) !=
-                static_cast<uint16_t>(key_kind_)) {
-            return "INDEX_META does not match the in-memory tree state";
-        }
-        if (IsEmpty()) {
-            return std::nullopt;
-        }
+            if (catalog_root_meta_) {
+                ReadPageGuard header_guard = FetchRead(0);
+                const auto* header = header_guard.As<BytePage>();
+                const page_id_t catalog_root =
+                    bpt_detail::ReadPageId(reinterpret_cast<const uint8_t*>(header->data() + 28));
+                if (catalog_root != meta_page_id_) {
+                    return "Database header catalog_root does not reference INDEX_META";
+                }
+            }
+            if ((root_page_id_ == INVALID_PAGE_ID) != (height_ == 0)) {
+                return "INDEX_META root and height disagree";
+            }
+            bpt_detail::IndexMetaLayout stored{};
+            {
+                ReadPageGuard guard = FetchRead(meta_page_id_);
+                std::memcpy(&stored, guard.As<BytePage>()->data(), sizeof(stored));
+            }
+            if (bpt_detail::ReadPageId(stored.root_page_id.data()) != root_page_id_ ||
+                bpt_detail::ReadU16(stored.height.data()) != height_ ||
+                bpt_detail::ReadU16(stored.key_kind.data()) != static_cast<uint16_t>(key_kind_)) {
+                return "INDEX_META does not match the in-memory tree state";
+            }
+            if (IsEmpty()) {
+                return std::nullopt;
+            }
 
-        std::vector<page_id_t> leaves;
-        std::vector<page_id_t> recursion_stack;
-        AuditRange range;
-        std::optional<std::string> error;
-        std::function<AuditRange(page_id_t, uint16_t, bool)> audit =
-            [&](page_id_t page_id, uint16_t level, bool is_root) -> AuditRange {
+            std::vector<page_id_t> leaves;
+            std::vector<page_id_t> recursion_stack;
+            AuditRange range;
+            std::optional<std::string> error;
+            std::function<AuditRange(page_id_t, uint16_t, bool)> audit =
+                [&](page_id_t page_id, uint16_t level, bool is_root) -> AuditRange {
+                if (error) {
+                    return {};
+                }
+                if (std::find(recursion_stack.begin(), recursion_stack.end(), page_id) !=
+                    recursion_stack.end()) {
+                    error = "B+ tree child pointers contain a cycle";
+                    return {};
+                }
+                recursion_stack.push_back(page_id);
+                AuditRange result;
+                if (level == 1) {
+                    ReadPageGuard guard = FetchRead(page_id);
+                    const auto* leaf = LeafRead(guard);
+                    const uint16_t count = ReadCount(leaf->count.data());
+                    if (count > kLeafCapacity || (!is_root && count < LeafMinimum()) ||
+                        (is_root && count == 0)) {
+                        error = "Leaf occupancy is invalid";
+                    } else {
+                        for (uint16_t index = 0; index < count; ++index) {
+                            const KeyType current = DecodeKey(leaf->entries[index]);
+                            if (index != 0 &&
+                                !comparator_(DecodeKey(leaf->entries[index - 1]), current)) {
+                                error = "Leaf keys are not strictly ordered";
+                                break;
+                            }
+                        }
+                        if (count != 0) {
+                            result.minimum = DecodeKey(leaf->entries[0]);
+                            result.maximum = DecodeKey(leaf->entries[count - 1U]);
+                        }
+                    }
+                    leaves.push_back(page_id);
+                } else {
+                    std::vector<page_id_t> children;
+                    std::vector<KeyType> separators;
+                    {
+                        ReadPageGuard guard = FetchRead(page_id);
+                        const auto* internal = InternalRead(guard);
+                        const uint16_t count = ReadCount(internal->count.data());
+                        if (count > kInternalKeyCapacity ||
+                            (!is_root && count < InternalMinimumKeys()) ||
+                            (is_root && count == 0)) {
+                            error = "Internal-node occupancy is invalid";
+                        } else {
+                            children.reserve(static_cast<size_t>(count) + 1U);
+                            separators.reserve(count);
+                            for (uint16_t child_index = 0; child_index <= count; ++child_index) {
+                                children.push_back(bpt_detail::ReadPageId(
+                                    internal->entries[child_index].child_page_id.data()));
+                                if (child_index != 0) {
+                                    separators.push_back(DecodeKey(internal->entries[child_index]));
+                                }
+                            }
+                        }
+                    }
+                    for (size_t child_index = 0; !error && child_index < children.size();
+                         ++child_index) {
+                        AuditRange child_range =
+                            audit(children[child_index], static_cast<uint16_t>(level - 1U), false);
+                        if (error) {
+                            break;
+                        }
+                        if (child_index == 0) {
+                            result.minimum = child_range.minimum;
+                        } else {
+                            const KeyType& separator = separators[child_index - 1U];
+                            if (!child_range.minimum ||
+                                !KeysEqual(separator, *child_range.minimum) || !result.maximum ||
+                                !comparator_(*result.maximum, separator)) {
+                                error = "Internal separator bounds are invalid";
+                                break;
+                            }
+                        }
+                        if (child_range.maximum) {
+                            result.maximum = child_range.maximum;
+                        }
+                    }
+                }
+                recursion_stack.pop_back();
+                return result;
+            };
+            range = audit(root_page_id_, height_, true);
+            (void)range;
             if (error) {
-                return {};
+                return error;
             }
-            if (std::find(recursion_stack.begin(), recursion_stack.end(), page_id) !=
-                recursion_stack.end()) {
-                error = "B+ tree child pointers contain a cycle";
-                return {};
-            }
-            recursion_stack.push_back(page_id);
-            AuditRange result;
-            if (level == 1) {
+
+            std::vector<page_id_t> chain;
+            std::vector<KeyType> chain_keys;
+            page_id_t page_id = leaves.front();
+            std::vector<page_id_t> seen;
+            while (page_id != INVALID_PAGE_ID) {
+                if (std::find(seen.begin(), seen.end(), page_id) != seen.end()) {
+                    return "Leaf chain contains a cycle";
+                }
+                seen.push_back(page_id);
+                chain.push_back(page_id);
                 ReadPageGuard guard = FetchRead(page_id);
                 const auto* leaf = LeafRead(guard);
                 const uint16_t count = ReadCount(leaf->count.data());
-                if (count > kLeafCapacity || (!is_root && count < LeafMinimum()) ||
-                    (is_root && count == 0)) {
-                    error = "Leaf occupancy is invalid";
-                } else {
-                    for (uint16_t index = 0; index < count; ++index) {
-                        const KeyType current = DecodeKey(leaf->entries[index]);
-                        if (index != 0 &&
-                            !comparator_(DecodeKey(leaf->entries[index - 1]), current)) {
-                            error = "Leaf keys are not strictly ordered";
-                            break;
-                        }
+                for (uint16_t index = 0; index < count; ++index) {
+                    const KeyType current = DecodeKey(leaf->entries[index]);
+                    if (!chain_keys.empty() && !comparator_(chain_keys.back(), current)) {
+                        return "Leaf chain keys are not strictly ordered";
                     }
-                    if (count != 0) {
-                        result.minimum = DecodeKey(leaf->entries[0]);
-                        result.maximum = DecodeKey(leaf->entries[count - 1U]);
-                    }
+                    chain_keys.push_back(current);
                 }
-                leaves.push_back(page_id);
-            } else {
-                ReadPageGuard guard = FetchRead(page_id);
-                const auto* internal = InternalRead(guard);
-                const uint16_t count = ReadCount(internal->count.data());
-                if (count > kInternalKeyCapacity ||
-                    (!is_root && count < InternalMinimumKeys()) ||
-                    (is_root && count == 0)) {
-                    error = "Internal-node occupancy is invalid";
-                }
-                for (uint16_t child_index = 0;
-                     !error && child_index <= count; ++child_index) {
-                    const page_id_t child =
-                        bpt_detail::ReadPageId(internal->entries[child_index].child_page_id.data());
-                    AuditRange child_range = audit(child, static_cast<uint16_t>(level - 1U), false);
-                    if (error) {
-                        break;
-                    }
-                    if (child_index == 0) {
-                        result.minimum = child_range.minimum;
-                    } else {
-                        const KeyType separator =
-                            DecodeKey(internal->entries[child_index]);
-                        if (!child_range.minimum ||
-                            !KeysEqual(separator, *child_range.minimum) ||
-                            !result.maximum || !comparator_(*result.maximum, separator)) {
-                            error = "Internal separator bounds are invalid";
-                            break;
-                        }
-                    }
-                    if (child_range.maximum) {
-                        result.maximum = child_range.maximum;
-                    }
-                }
+                page_id = bpt_detail::ReadPageId(leaf->next_page_id.data());
             }
-            recursion_stack.pop_back();
-            return result;
-        };
-        range = audit(root_page_id_, height_, true);
-        (void)range;
-        if (error) {
-            return error;
-        }
-
-        std::vector<page_id_t> chain;
-        std::vector<KeyType> chain_keys;
-        page_id_t page_id = leaves.front();
-        std::vector<page_id_t> seen;
-        while (page_id != INVALID_PAGE_ID) {
-            if (std::find(seen.begin(), seen.end(), page_id) != seen.end()) {
-                return "Leaf chain contains a cycle";
+            if (chain != leaves) {
+                return "Leaf chain is incomplete or differs from in-order traversal";
             }
-            seen.push_back(page_id);
-            chain.push_back(page_id);
-            ReadPageGuard guard = FetchRead(page_id);
-            const auto* leaf = LeafRead(guard);
-            const uint16_t count = ReadCount(leaf->count.data());
-            for (uint16_t index = 0; index < count; ++index) {
-                const KeyType current = DecodeKey(leaf->entries[index]);
-                if (!chain_keys.empty() && !comparator_(chain_keys.back(), current)) {
-                    return "Leaf chain keys are not strictly ordered";
-                }
-                chain_keys.push_back(current);
-            }
-            page_id = bpt_detail::ReadPageId(leaf->next_page_id.data());
-        }
-        if (chain != leaves) {
-            return "Leaf chain is incomplete or differs from in-order traversal";
-        }
-        return std::nullopt;
+            return std::nullopt;
         } catch (const DbError& error) {
             return std::string("Page validation failed: ") + error.what();
         }
     }
 
-private:
+   private:
     static uint16_t ReadCount(const uint8_t* count) noexcept {
         return bpt_detail::ReadU16(count);
     }
@@ -734,15 +761,13 @@ private:
     }
     static const LeafLayout* LeafRead(const ReadPageGuard& guard) {
         if (guard.GetPageType() != PageType::BTREE_LEAF) {
-            throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree leaf page",
-                          guard.GetPageId());
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree leaf page", guard.GetPageId());
         }
         return reinterpret_cast<const LeafLayout*>(guard.As<BytePage>()->data());
     }
     static LeafLayout* LeafWrite(WritePageGuard& guard) {
         if (guard.GetPageType() != PageType::BTREE_LEAF) {
-            throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree leaf page",
-                          guard.GetPageId());
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree leaf page", guard.GetPageId());
         }
         return reinterpret_cast<LeafLayout*>(guard.AsMut<BytePage>()->data());
     }
@@ -788,23 +813,22 @@ private:
     bool KeysEqual(const KeyType& lhs, const KeyType& rhs) const {
         return !comparator_(lhs, rhs) && !comparator_(rhs, lhs);
     }
-    size_t LeafLowerBound(const LeafLayout* leaf, uint16_t count,
-                          const KeyType& key) const {
-        const auto found = std::lower_bound(
-            leaf->entries.begin(), leaf->entries.begin() + count, key,
-            [&](const LeafEntry& entry, const KeyType& wanted) {
-                return comparator_(KeyCodec::Decode(entry.key.data()), wanted);
-            });
+    size_t LeafLowerBound(const LeafLayout* leaf, uint16_t count, const KeyType& key) const {
+        const auto found =
+            std::lower_bound(leaf->entries.begin(), leaf->entries.begin() + count, key,
+                             [&](const LeafEntry& entry, const KeyType& wanted) {
+                                 return comparator_(KeyCodec::Decode(entry.key.data()), wanted);
+                             });
         return static_cast<size_t>(found - leaf->entries.begin());
     }
     size_t InternalChildIndex(const InternalLayout* internal, uint16_t count,
                               const KeyType& key) const {
-        const auto found = std::upper_bound(
-            internal->entries.begin() + 1,
-            internal->entries.begin() + static_cast<std::ptrdiff_t>(count + 1U), key,
-            [&](const KeyType& wanted, const InternalEntry& entry) {
-                return comparator_(wanted, KeyCodec::Decode(entry.key.data()));
-            });
+        const auto found =
+            std::upper_bound(internal->entries.begin() + 1,
+                             internal->entries.begin() + static_cast<std::ptrdiff_t>(count + 1U),
+                             key, [&](const KeyType& wanted, const InternalEntry& entry) {
+                                 return comparator_(wanted, KeyCodec::Decode(entry.key.data()));
+                             });
         return static_cast<size_t>(found - (internal->entries.begin() + 1));
     }
     static ReadPageGuard FetchRead(const page_id_t page_id,
@@ -861,8 +885,8 @@ private:
 
             WritePageGuard header_guard = FetchWrite(0);
             BytePage* header = header_guard.AsMut<BytePage>();
-            const page_id_t existing = bpt_detail::ReadPageId(
-                reinterpret_cast<const uint8_t*>(header->data() + 28));
+            const page_id_t existing =
+                bpt_detail::ReadPageId(reinterpret_cast<const uint8_t*>(header->data() + 28));
             if (existing == INVALID_PAGE_ID) {
                 bpt_detail::WritePageId(reinterpret_cast<uint8_t*>(header->data() + 28),
                                         meta_page_id_);
@@ -889,8 +913,8 @@ private:
         if (guard.GetPageType() != PageType::INDEX_META) {
             throw DbError(ErrorCode::PAGE_CORRUPT, "Expected INDEX_META page", meta_page_id_);
         }
-        const auto* meta = reinterpret_cast<const bpt_detail::IndexMetaLayout*>(
-            guard.As<BytePage>()->data());
+        const auto* meta =
+            reinterpret_cast<const bpt_detail::IndexMetaLayout*>(guard.As<BytePage>()->data());
         const uint16_t stored_kind = bpt_detail::ReadU16(meta->key_kind.data());
         if (stored_kind != static_cast<uint16_t>(key_kind_)) {
             throw DbError(ErrorCode::PAGE_CORRUPT, "INDEX_META key kind does not match index");
@@ -908,8 +932,8 @@ private:
 
     void SetRoot(page_id_t root_page_id, uint16_t height) {
         WritePageGuard guard = FetchWrite(meta_page_id_);
-        auto* meta = reinterpret_cast<bpt_detail::IndexMetaLayout*>(
-            guard.AsMut<BytePage>()->data());
+        auto* meta =
+            reinterpret_cast<bpt_detail::IndexMetaLayout*>(guard.AsMut<BytePage>()->data());
         bpt_detail::WritePageId(meta->root_page_id.data(), root_page_id);
         bpt_detail::WriteU16(meta->height.data(), height);
         bpt_detail::WriteU16(meta->key_kind.data(), static_cast<uint16_t>(key_kind_));
@@ -952,12 +976,14 @@ private:
             WritePageGuard parent_guard = FetchWrite(parent_id);
             auto* parent = InternalWrite(parent_guard);
             const uint16_t old_count = ReadCount(parent->count.data());
-            const size_t key_index = static_cast<size_t>(std::lower_bound(
-                parent->entries.begin() + 1,
-                parent->entries.begin() + static_cast<std::ptrdiff_t>(old_count + 1U),
-                promoted, [&](const InternalEntry& entry, const KeyType& wanted) {
-                    return comparator_(DecodeKey(entry), wanted);
-                }) - (parent->entries.begin() + 1));
+            const size_t key_index = static_cast<size_t>(
+                std::lower_bound(
+                    parent->entries.begin() + 1,
+                    parent->entries.begin() + static_cast<std::ptrdiff_t>(old_count + 1U), promoted,
+                    [&](const InternalEntry& entry, const KeyType& wanted) {
+                        return comparator_(DecodeKey(entry), wanted);
+                    }) -
+                (parent->entries.begin() + 1));
 
             if (old_count < kInternalKeyCapacity) {
                 std::move_backward(
@@ -974,12 +1000,11 @@ private:
             std::vector<page_id_t> children;
             keys.reserve(old_count + 1U);
             children.reserve(old_count + 2U);
-            children.push_back(
-                bpt_detail::ReadPageId(parent->entries[0].child_page_id.data()));
+            children.push_back(bpt_detail::ReadPageId(parent->entries[0].child_page_id.data()));
             for (uint16_t index = 0; index < old_count; ++index) {
                 keys.push_back(DecodeKey(parent->entries[index + 1U]));
-                children.push_back(bpt_detail::ReadPageId(
-                    parent->entries[index + 1U].child_page_id.data()));
+                children.push_back(
+                    bpt_detail::ReadPageId(parent->entries[index + 1U].child_page_id.data()));
             }
             keys.insert(keys.begin() + static_cast<std::ptrdiff_t>(key_index), promoted);
             children.insert(children.begin() + static_cast<std::ptrdiff_t>(key_index + 1U),
@@ -987,26 +1012,26 @@ private:
 
             const size_t middle = keys.size() / 2U;
             promoted = keys[middle];
+            std::vector<KeyType> left_keys(keys.begin(),
+                                           keys.begin() + static_cast<std::ptrdiff_t>(middle));
+            std::vector<page_id_t> left_children(
+                children.begin(), children.begin() + static_cast<std::ptrdiff_t>(middle + 1U));
+            std::vector<KeyType> right_keys(keys.begin() + static_cast<std::ptrdiff_t>(middle + 1U),
+                                            keys.end());
+            std::vector<page_id_t> right_children(
+                children.begin() + static_cast<std::ptrdiff_t>(middle + 1U), children.end());
+            parent_guard.Drop();
+
             WritePageGuard right_guard = NewPage();
             new_right = right_guard.GetPageId();
             right_guard.SetPageType(PageType::BTREE_INTERNAL);
             auto* right = InternalWrite(right_guard);
-            InitializeInternal(right);
-            const size_t right_key_count = keys.size() - middle - 1U;
-            WriteCount(parent->count.data(), static_cast<uint16_t>(middle));
-            WriteChild(parent->entries[0], children[0]);
-            for (size_t index = 0; index < middle; ++index) {
-                WriteInternalKey(parent->entries[index + 1U], keys[index]);
-                WriteChild(parent->entries[index + 1U], children[index + 1U]);
-            }
-            WriteCount(right->count.data(), static_cast<uint16_t>(right_key_count));
-            WriteChild(right->entries[0], children[middle + 1U]);
-            for (size_t index = 0; index < right_key_count; ++index) {
-                WriteInternalKey(right->entries[index + 1U], keys[middle + 1U + index]);
-                WriteChild(right->entries[index + 1U],
-                           children[middle + 2U + index]);
-            }
+            StoreInternal(right, right_keys, right_children);
             right_guard.Drop();
+
+            parent_guard = FetchWrite(parent_id);
+            parent = InternalWrite(parent_guard);
+            StoreInternal(parent, left_keys, left_children);
             parent_guard.Drop();
 
             if (parent_level == 0) {
@@ -1047,8 +1072,7 @@ private:
     }
 
     void FixSeparator(const DescentPath& path, const KeyType& new_minimum) {
-        for (size_t parent_level = path.child_indexes.size(); parent_level > 0;
-             --parent_level) {
+        for (size_t parent_level = path.child_indexes.size(); parent_level > 0; --parent_level) {
             const size_t level = parent_level - 1U;
             const size_t child_index = path.child_indexes[level];
             if (child_index == 0) {
@@ -1061,8 +1085,7 @@ private:
         }
     }
 
-    std::vector<KeyType> InternalKeys(const InternalLayout* internal,
-                                      uint16_t count) const {
+    std::vector<KeyType> InternalKeys(const InternalLayout* internal, uint16_t count) const {
         std::vector<KeyType> keys;
         keys.reserve(count);
         for (uint16_t index = 0; index < count; ++index) {
@@ -1070,8 +1093,7 @@ private:
         }
         return keys;
     }
-    static std::vector<page_id_t> InternalChildren(const InternalLayout* internal,
-                                                  uint16_t count) {
+    static std::vector<page_id_t> InternalChildren(const InternalLayout* internal, uint16_t count) {
         std::vector<page_id_t> children;
         children.reserve(static_cast<size_t>(count) + 1U);
         for (uint16_t index = 0; index <= count; ++index) {
@@ -1097,88 +1119,95 @@ private:
         const page_id_t parent_id = path.pages[parent_level];
         const size_t child_index = path.child_indexes[parent_level];
         const page_id_t leaf_id = path.pages.back();
+        std::vector<KeyType> parent_keys;
+        std::vector<page_id_t> parent_children;
+        {
+            WritePageGuard parent_guard = FetchWrite(parent_id);
+            const auto* parent = InternalWrite(parent_guard);
+            const uint16_t parent_count = ReadCount(parent->count.data());
+            parent_keys = InternalKeys(parent, parent_count);
+            parent_children = InternalChildren(parent, parent_count);
+        }
+
+        auto read_leaf = [this](page_id_t page_id) {
+            std::pair<std::vector<LeafEntry>, page_id_t> result;
+            ReadPageGuard guard = FetchRead(page_id);
+            const auto* leaf = LeafRead(guard);
+            const uint16_t count = ReadCount(leaf->count.data());
+            result.first.assign(leaf->entries.begin(), leaf->entries.begin() + count);
+            result.second = bpt_detail::ReadPageId(leaf->next_page_id.data());
+            return result;
+        };
+        auto write_leaf = [this](page_id_t page_id, const std::vector<LeafEntry>& entries,
+                                 page_id_t next_page_id) {
+            WritePageGuard guard = FetchWrite(page_id);
+            auto* leaf = LeafWrite(guard);
+            std::copy(entries.begin(), entries.end(), leaf->entries.begin());
+            WriteCount(leaf->count.data(), static_cast<uint16_t>(entries.size()));
+            bpt_detail::WritePageId(leaf->next_page_id.data(), next_page_id);
+        };
+
+        auto [leaf_entries, leaf_next] = read_leaf(leaf_id);
+        const uint16_t parent_count = static_cast<uint16_t>(parent_keys.size());
         bool merged = false;
         page_id_t retired = INVALID_PAGE_ID;
         std::optional<KeyType> merged_minimum;
+        if (child_index > 0) {
+            const page_id_t left_id = parent_children[child_index - 1U];
+            auto [left_entries, left_next] = read_leaf(left_id);
+            if (left_entries.size() > LeafMinimum()) {
+                leaf_entries.insert(leaf_entries.begin(), left_entries.back());
+                left_entries.pop_back();
+                parent_keys[child_index - 1U] = DecodeKey(leaf_entries.front());
+                write_leaf(left_id, left_entries, left_next);
+                write_leaf(leaf_id, leaf_entries, leaf_next);
+                WritePageGuard parent_guard = FetchWrite(parent_id);
+                StoreInternal(InternalWrite(parent_guard), parent_keys, parent_children);
+                return;
+            }
+        }
+        if (child_index < parent_count) {
+            const page_id_t right_id = parent_children[child_index + 1U];
+            auto [right_entries, right_next] = read_leaf(right_id);
+            if (right_entries.size() > LeafMinimum()) {
+                leaf_entries.push_back(right_entries.front());
+                right_entries.erase(right_entries.begin());
+                parent_keys[child_index] = DecodeKey(right_entries.front());
+                write_leaf(leaf_id, leaf_entries, leaf_next);
+                write_leaf(right_id, right_entries, right_next);
+                WritePageGuard parent_guard = FetchWrite(parent_id);
+                StoreInternal(InternalWrite(parent_guard), parent_keys, parent_children);
+                return;
+            }
+        }
+
+        if (child_index > 0) {
+            const page_id_t left_id = parent_children[child_index - 1U];
+            auto [left_entries, left_next] = read_leaf(left_id);
+            left_entries.insert(left_entries.end(), leaf_entries.begin(), leaf_entries.end());
+            write_leaf(left_id, left_entries, leaf_next);
+            parent_keys.erase(parent_keys.begin() + static_cast<std::ptrdiff_t>(child_index - 1U));
+            parent_children.erase(parent_children.begin() +
+                                  static_cast<std::ptrdiff_t>(child_index));
+            retired = leaf_id;
+            merged = true;
+        } else {
+            const page_id_t right_id = parent_children[child_index + 1U];
+            auto [right_entries, right_next] = read_leaf(right_id);
+            if (!right_entries.empty()) {
+                merged_minimum = DecodeKey(right_entries.front());
+            }
+            leaf_entries.insert(leaf_entries.end(), right_entries.begin(), right_entries.end());
+            write_leaf(leaf_id, leaf_entries, right_next);
+            parent_keys.erase(parent_keys.begin() + static_cast<std::ptrdiff_t>(child_index));
+            parent_children.erase(parent_children.begin() +
+                                  static_cast<std::ptrdiff_t>(child_index + 1U));
+            retired = right_id;
+            merged = true;
+        }
         {
             WritePageGuard parent_guard = FetchWrite(parent_id);
-            auto* parent = InternalWrite(parent_guard);
-            const uint16_t parent_count = ReadCount(parent->count.data());
-            WritePageGuard leaf_guard = FetchWrite(leaf_id);
-            auto* leaf = LeafWrite(leaf_guard);
-            uint16_t leaf_count = ReadCount(leaf->count.data());
-
-            if (child_index > 0) {
-                const page_id_t left_id = bpt_detail::ReadPageId(
-                    parent->entries[child_index - 1U].child_page_id.data());
-                WritePageGuard left_guard = FetchWrite(left_id);
-                auto* left = LeafWrite(left_guard);
-                const uint16_t left_count = ReadCount(left->count.data());
-                if (left_count > LeafMinimum()) {
-                    std::move_backward(leaf->entries.begin(),
-                                       leaf->entries.begin() + leaf_count,
-                                       leaf->entries.begin() + leaf_count + 1U);
-                    leaf->entries[0] = left->entries[left_count - 1U];
-                    WriteCount(leaf->count.data(), static_cast<uint16_t>(leaf_count + 1U));
-                    WriteCount(left->count.data(), static_cast<uint16_t>(left_count - 1U));
-                    WriteInternalKey(parent->entries[child_index],
-                                     DecodeKey(leaf->entries[0]));
-                    return;
-                }
-            }
-            if (child_index < parent_count) {
-                const page_id_t right_id = bpt_detail::ReadPageId(
-                    parent->entries[child_index + 1U].child_page_id.data());
-                WritePageGuard right_guard = FetchWrite(right_id);
-                auto* right = LeafWrite(right_guard);
-                const uint16_t right_count = ReadCount(right->count.data());
-                if (right_count > LeafMinimum()) {
-                    leaf->entries[leaf_count] = right->entries[0];
-                    ++leaf_count;
-                    std::move(right->entries.begin() + 1,
-                              right->entries.begin() + right_count, right->entries.begin());
-                    WriteCount(leaf->count.data(), leaf_count);
-                    WriteCount(right->count.data(), static_cast<uint16_t>(right_count - 1U));
-                    WriteInternalKey(parent->entries[child_index + 1U],
-                                     DecodeKey(right->entries[0]));
-                    return;
-                }
-            }
-
-            if (child_index > 0) {
-                const page_id_t left_id = bpt_detail::ReadPageId(
-                    parent->entries[child_index - 1U].child_page_id.data());
-                WritePageGuard left_guard = FetchWrite(left_id);
-                auto* left = LeafWrite(left_guard);
-                const uint16_t left_count = ReadCount(left->count.data());
-                std::copy_n(leaf->entries.begin(), leaf_count,
-                            left->entries.begin() + left_count);
-                WriteCount(left->count.data(),
-                           static_cast<uint16_t>(left_count + leaf_count));
-                bpt_detail::WritePageId(left->next_page_id.data(),
-                                        bpt_detail::ReadPageId(leaf->next_page_id.data()));
-                RemoveInternalChild(parent, parent_count, child_index);
-                retired = leaf_id;
-                merged = true;
-            } else {
-                const page_id_t right_id = bpt_detail::ReadPageId(
-                    parent->entries[child_index + 1U].child_page_id.data());
-                WritePageGuard right_guard = FetchWrite(right_id);
-                auto* right = LeafWrite(right_guard);
-                const uint16_t right_count = ReadCount(right->count.data());
-                if (right_count != 0) {
-                    merged_minimum = DecodeKey(right->entries[0]);
-                }
-                std::copy_n(right->entries.begin(), right_count,
-                            leaf->entries.begin() + leaf_count);
-                WriteCount(leaf->count.data(),
-                           static_cast<uint16_t>(leaf_count + right_count));
-                bpt_detail::WritePageId(leaf->next_page_id.data(),
-                                        bpt_detail::ReadPageId(right->next_page_id.data()));
-                RemoveInternalChild(parent, parent_count, child_index + 1U);
-                retired = right_id;
-                merged = true;
-            }
+            StoreInternal(InternalWrite(parent_guard), parent_keys, parent_children);
         }
         if (retired != INVALID_PAGE_ID) {
             if (!buffer_pool_->DeletePage(retired)) {
@@ -1193,15 +1222,6 @@ private:
         }
     }
 
-    static void RemoveInternalChild(InternalLayout* parent, uint16_t parent_count,
-                                    size_t child_index) {
-        const size_t entry_index = child_index;
-        std::move(parent->entries.begin() + static_cast<std::ptrdiff_t>(entry_index + 1U),
-                  parent->entries.begin() + parent_count + 1U,
-                  parent->entries.begin() + static_cast<std::ptrdiff_t>(entry_index));
-        WriteCount(parent->count.data(), static_cast<uint16_t>(parent_count - 1U));
-    }
-
     void RebalanceInternal(const DescentPath& path, size_t level) {
         page_id_t current_id = path.pages[level];
         if (current_id == root_page_id_) {
@@ -1212,115 +1232,122 @@ private:
             const size_t parent_level = level - 1U;
             const page_id_t parent_id = path.pages[parent_level];
             const size_t child_index = path.child_indexes[parent_level];
-            bool done = false;
-            bool merged = false;
-            page_id_t retired = INVALID_PAGE_ID;
+            std::vector<KeyType> parent_keys;
+            std::vector<page_id_t> parent_children;
             {
                 WritePageGuard parent_guard = FetchWrite(parent_id);
-                auto* parent = InternalWrite(parent_guard);
+                const auto* parent = InternalWrite(parent_guard);
                 const uint16_t parent_count = ReadCount(parent->count.data());
-                WritePageGuard current_guard = FetchWrite(current_id);
-                auto* current = InternalWrite(current_guard);
-                const uint16_t current_count = ReadCount(current->count.data());
-                if (current_count >= InternalMinimumKeys()) {
+                parent_keys = InternalKeys(parent, parent_count);
+                parent_children = InternalChildren(parent, parent_count);
+            }
+
+            auto read_internal = [this](page_id_t page_id) {
+                std::pair<std::vector<KeyType>, std::vector<page_id_t>> result;
+                ReadPageGuard guard = FetchRead(page_id);
+                const auto* internal = InternalRead(guard);
+                const uint16_t count = ReadCount(internal->count.data());
+                result.first = InternalKeys(internal, count);
+                result.second = InternalChildren(internal, count);
+                return result;
+            };
+            auto [current_keys, current_children] = read_internal(current_id);
+            if (current_keys.size() >= InternalMinimumKeys()) {
+                return;
+            }
+
+            if (child_index > 0) {
+                const page_id_t left_id = parent_children[child_index - 1U];
+                auto [left_keys, left_children] = read_internal(left_id);
+                if (left_keys.size() > InternalMinimumKeys()) {
+                    current_keys.insert(current_keys.begin(), parent_keys[child_index - 1U]);
+                    current_children.insert(current_children.begin(), left_children.back());
+                    parent_keys[child_index - 1U] = left_keys.back();
+                    left_keys.pop_back();
+                    left_children.pop_back();
+                    {
+                        WritePageGuard guard = FetchWrite(left_id);
+                        StoreInternal(InternalWrite(guard), left_keys, left_children);
+                    }
+                    {
+                        WritePageGuard guard = FetchWrite(current_id);
+                        StoreInternal(InternalWrite(guard), current_keys, current_children);
+                    }
+                    {
+                        WritePageGuard guard = FetchWrite(parent_id);
+                        StoreInternal(InternalWrite(guard), parent_keys, parent_children);
+                    }
                     return;
                 }
-
-                if (child_index > 0) {
-                    const page_id_t left_id = bpt_detail::ReadPageId(
-                        parent->entries[child_index - 1U].child_page_id.data());
-                    WritePageGuard left_guard = FetchWrite(left_id);
-                    auto* left = InternalWrite(left_guard);
-                    const uint16_t left_count = ReadCount(left->count.data());
-                    if (left_count > InternalMinimumKeys()) {
-                        std::vector<KeyType> left_keys = InternalKeys(left, left_count);
-                        std::vector<page_id_t> left_children = InternalChildren(left, left_count);
-                        std::vector<KeyType> current_keys = InternalKeys(current, current_count);
-                        std::vector<page_id_t> current_children =
-                            InternalChildren(current, current_count);
-                        const KeyType parent_separator = DecodeKey(parent->entries[child_index]);
-                        current_keys.insert(current_keys.begin(), parent_separator);
-                        current_children.insert(current_children.begin(), left_children.back());
-                        WriteInternalKey(parent->entries[child_index], left_keys.back());
-                        left_keys.pop_back();
-                        left_children.pop_back();
-                        StoreInternal(left, left_keys, left_children);
-                        StoreInternal(current, current_keys, current_children);
-                        return;
+            }
+            const size_t parent_count = parent_keys.size();
+            if (child_index < parent_count) {
+                const page_id_t right_id = parent_children[child_index + 1U];
+                auto [right_keys, right_children] = read_internal(right_id);
+                if (right_keys.size() > InternalMinimumKeys()) {
+                    current_keys.push_back(parent_keys[child_index]);
+                    current_children.push_back(right_children.front());
+                    parent_keys[child_index] = right_keys.front();
+                    right_keys.erase(right_keys.begin());
+                    right_children.erase(right_children.begin());
+                    {
+                        WritePageGuard guard = FetchWrite(current_id);
+                        StoreInternal(InternalWrite(guard), current_keys, current_children);
                     }
-                }
-                if (child_index < parent_count) {
-                    const page_id_t right_id = bpt_detail::ReadPageId(
-                        parent->entries[child_index + 1U].child_page_id.data());
-                    WritePageGuard right_guard = FetchWrite(right_id);
-                    auto* right = InternalWrite(right_guard);
-                    const uint16_t right_count = ReadCount(right->count.data());
-                    if (right_count > InternalMinimumKeys()) {
-                        std::vector<KeyType> current_keys = InternalKeys(current, current_count);
-                        std::vector<page_id_t> current_children =
-                            InternalChildren(current, current_count);
-                        std::vector<KeyType> right_keys = InternalKeys(right, right_count);
-                        std::vector<page_id_t> right_children = InternalChildren(right, right_count);
-                        current_keys.push_back(DecodeKey(parent->entries[child_index + 1U]));
-                        current_children.push_back(right_children.front());
-                        WriteInternalKey(parent->entries[child_index + 1U], right_keys.front());
-                        right_keys.erase(right_keys.begin());
-                        right_children.erase(right_children.begin());
-                        StoreInternal(current, current_keys, current_children);
-                        StoreInternal(right, right_keys, right_children);
-                        return;
+                    {
+                        WritePageGuard guard = FetchWrite(right_id);
+                        StoreInternal(InternalWrite(guard), right_keys, right_children);
                     }
+                    {
+                        WritePageGuard guard = FetchWrite(parent_id);
+                        StoreInternal(InternalWrite(guard), parent_keys, parent_children);
+                    }
+                    return;
                 }
+            }
 
-                if (child_index > 0) {
-                    const page_id_t left_id = bpt_detail::ReadPageId(
-                        parent->entries[child_index - 1U].child_page_id.data());
-                    WritePageGuard left_guard = FetchWrite(left_id);
-                    auto* left = InternalWrite(left_guard);
-                    const uint16_t left_count = ReadCount(left->count.data());
-                    std::vector<KeyType> keys = InternalKeys(left, left_count);
-                    std::vector<page_id_t> children = InternalChildren(left, left_count);
-                    std::vector<KeyType> current_keys = InternalKeys(current, current_count);
-                    std::vector<page_id_t> current_children =
-                        InternalChildren(current, current_count);
-                    keys.push_back(DecodeKey(parent->entries[child_index]));
-                    keys.insert(keys.end(), current_keys.begin(), current_keys.end());
-                    children.insert(children.end(), current_children.begin(),
-                                    current_children.end());
-                    StoreInternal(left, keys, children);
-                    RemoveInternalChild(parent, parent_count, child_index);
-                    retired = current_id;
-                    merged = true;
-                } else {
-                    const page_id_t right_id = bpt_detail::ReadPageId(
-                        parent->entries[child_index + 1U].child_page_id.data());
-                    WritePageGuard right_guard = FetchWrite(right_id);
-                    auto* right = InternalWrite(right_guard);
-                    const uint16_t right_count = ReadCount(right->count.data());
-                    std::vector<KeyType> keys = InternalKeys(current, current_count);
-                    std::vector<page_id_t> children = InternalChildren(current, current_count);
-                    std::vector<KeyType> right_keys = InternalKeys(right, right_count);
-                    std::vector<page_id_t> right_children = InternalChildren(right, right_count);
-                    keys.push_back(DecodeKey(parent->entries[child_index + 1U]));
-                    keys.insert(keys.end(), right_keys.begin(), right_keys.end());
-                    children.insert(children.end(), right_children.begin(), right_children.end());
-                    StoreInternal(current, keys, children);
-                    RemoveInternalChild(parent, parent_count, child_index + 1U);
-                    retired = right_id;
-                    merged = true;
+            page_id_t retired = INVALID_PAGE_ID;
+            if (child_index > 0) {
+                const page_id_t left_id = parent_children[child_index - 1U];
+                auto [left_keys, left_children] = read_internal(left_id);
+                left_keys.push_back(parent_keys[child_index - 1U]);
+                left_keys.insert(left_keys.end(), current_keys.begin(), current_keys.end());
+                left_children.insert(left_children.end(), current_children.begin(),
+                                     current_children.end());
+                {
+                    WritePageGuard guard = FetchWrite(left_id);
+                    StoreInternal(InternalWrite(guard), left_keys, left_children);
                 }
+                parent_keys.erase(parent_keys.begin() +
+                                  static_cast<std::ptrdiff_t>(child_index - 1U));
+                parent_children.erase(parent_children.begin() +
+                                      static_cast<std::ptrdiff_t>(child_index));
+                retired = current_id;
+            } else {
+                const page_id_t right_id = parent_children[child_index + 1U];
+                auto [right_keys, right_children] = read_internal(right_id);
+                current_keys.push_back(parent_keys[child_index]);
+                current_keys.insert(current_keys.end(), right_keys.begin(), right_keys.end());
+                current_children.insert(current_children.end(), right_children.begin(),
+                                        right_children.end());
+                {
+                    WritePageGuard guard = FetchWrite(current_id);
+                    StoreInternal(InternalWrite(guard), current_keys, current_children);
+                }
+                parent_keys.erase(parent_keys.begin() + static_cast<std::ptrdiff_t>(child_index));
+                parent_children.erase(parent_children.begin() +
+                                      static_cast<std::ptrdiff_t>(child_index + 1U));
+                retired = right_id;
+            }
+            {
+                WritePageGuard guard = FetchWrite(parent_id);
+                StoreInternal(InternalWrite(guard), parent_keys, parent_children);
             }
             if (retired != INVALID_PAGE_ID) {
                 if (!buffer_pool_->DeletePage(retired)) {
-                    throw DbError(ErrorCode::PAGE_CORRUPT,
-                                  "Could not retire merged internal node", retired);
+                    throw DbError(ErrorCode::PAGE_CORRUPT, "Could not retire merged internal node",
+                                  retired);
                 }
-            }
-            if (!merged) {
-                done = true;
-            }
-            if (done) {
-                return;
             }
             current_id = parent_id;
             level = parent_level;
@@ -1337,8 +1364,7 @@ private:
         if (ReadCount(root->count.data()) != 0) {
             return;
         }
-        const page_id_t only_child =
-            bpt_detail::ReadPageId(root->entries[0].child_page_id.data());
+        const page_id_t only_child = bpt_detail::ReadPageId(root->entries[0].child_page_id.data());
         root_guard.Drop();
         if (!buffer_pool_->DeletePage(root_id)) {
             throw DbError(ErrorCode::PAGE_CORRUPT, "Could not retire collapsed root", root_id);

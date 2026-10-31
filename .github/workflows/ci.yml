@@ -90,8 +90,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.ExecutorStatementGateTsanClean | tee tsan.log
-          build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress | tee -a tsan.log
+          build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.ReaderWriterTsanClean | tee tsan.log
+          build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.ExecutorStatementGateTsanClean | tee -a tsan.log
+          RELDB_CONCURRENCY_STRESS_SECONDS=10 build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress | tee -a tsan.log
       - name: Run WAL timer TSan stress
         run: build-tsan/reldb_regression_tests --gtest_filter=WalTest.NormalModeSyncThreadTsanClean
       - name: Upload TSan log on failure

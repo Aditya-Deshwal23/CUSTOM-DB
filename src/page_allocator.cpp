@@ -1,12 +1,12 @@
 #include "page_allocator.h"
 
-#include "buffer_pool_manager.h"
-#include "db_error.h"
-
 #include <array>
 #include <cstring>
 #include <limits>
 #include <unordered_set>
+
+#include "buffer_pool_manager.h"
+#include "db_error.h"
 
 namespace relational_db {
 namespace {
@@ -16,10 +16,8 @@ constexpr size_t kFreeListHeadOffset = 24;
 
 uint32_t ReadU32(const char* bytes) {
     const auto* data = reinterpret_cast<const uint8_t*>(bytes);
-    return static_cast<uint32_t>(data[0]) |
-           (static_cast<uint32_t>(data[1]) << 8U) |
-           (static_cast<uint32_t>(data[2]) << 16U) |
-           (static_cast<uint32_t>(data[3]) << 24U);
+    return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8U) |
+           (static_cast<uint32_t>(data[2]) << 16U) | (static_cast<uint32_t>(data[3]) << 24U);
 }
 
 uint64_t ReadU64(const char* bytes) {
@@ -82,75 +80,104 @@ void PageAllocator::LoadFreeList() {
             const auto* body = free_page.As<std::array<char, PAGE_DATA_SIZE>>();
             free_head = DecodePageId(ReadU32(body->data()));
         }
-        std::lock_guard<std::mutex> lock(buffer_pool_.pool_mutex_);
+        std::lock_guard<RankedMutex> lock(buffer_pool_.pool_mutex_);
         buffer_pool_.free_pages_.insert(current_page);
     }
 }
 
 WritePageGuard PageAllocator::NewPage() {
-    WritePageGuard header_guard = buffer_pool_.FetchWrite(0);
-    auto* header = header_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
-    const int32_t free_head = DecodePageId(ReadU32(header->data() + kFreeListHeadOffset));
+    std::lock_guard<std::mutex> allocator_lock(allocator_mutex_);
+    int32_t free_head = INVALID_PAGE_ID;
+    {
+        ReadPageGuard header_guard = buffer_pool_.FetchRead(0);
+        const auto* header = header_guard.As<std::array<char, PAGE_DATA_SIZE>>();
+        free_head = DecodePageId(ReadU32(header->data() + kFreeListHeadOffset));
+    }
 
     if (free_head != INVALID_PAGE_ID) {
+        int32_t next_free = INVALID_PAGE_ID;
+        {
+            WritePageGuard free_page = buffer_pool_.AllocateFreePageGuarded(free_head);
+            const auto* free_body = free_page.As<std::array<char, PAGE_DATA_SIZE>>();
+            next_free = DecodePageId(ReadU32(free_body->data()));
+        }
+        {
+            WritePageGuard header_guard = buffer_pool_.FetchWrite(0);
+            auto* header = header_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
+            WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(next_free));
+        }
         WritePageGuard free_page = buffer_pool_.AllocateFreePageGuarded(free_head);
-        const auto* free_body = free_page.As<std::array<char, PAGE_DATA_SIZE>>();
-        const int32_t next_free = DecodePageId(ReadU32(free_body->data()));
-        WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(next_free));
         auto* body = free_page.AsMut<std::array<char, PAGE_DATA_SIZE>>();
         body->fill(0);
         free_page.SetPageType(PageType::HEAP);
         return free_page;
     }
 
-    const uint64_t page_count = ReadU64(header->data() + kPageCountOffset);
-    if (page_count > static_cast<uint64_t>(std::numeric_limits<page_id_t>::max())) {
-        throw DbError(ErrorCode::IO_ERROR, "Database page IDs are exhausted");
+    page_id_t page_id = INVALID_PAGE_ID;
+    {
+        WritePageGuard header_guard = buffer_pool_.FetchWrite(0);
+        auto* header = header_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
+        const uint64_t page_count = ReadU64(header->data() + kPageCountOffset);
+        if (page_count > static_cast<uint64_t>(std::numeric_limits<page_id_t>::max())) {
+            throw DbError(ErrorCode::IO_ERROR, "Database page IDs are exhausted");
+        }
+        page_id = static_cast<page_id_t>(page_count);
+        buffer_pool_.disk_manager_->ReservePages(1);
+        WriteU64(header->data() + kPageCountOffset, page_count + 1U);
     }
-    const page_id_t page_id = static_cast<page_id_t>(page_count);
-    buffer_pool_.disk_manager_->ReservePages(1);
-    WriteU64(header->data() + kPageCountOffset, page_count + 1U);
     return buffer_pool_.AllocatePageFrame(page_id);
 }
 
 bool PageAllocator::DeletePage(page_id_t page_id) {
+    std::lock_guard<std::mutex> allocator_lock(allocator_mutex_);
     if (page_id <= 0 ||
         static_cast<uint64_t>(page_id) >= buffer_pool_.disk_manager_->SizeInPages()) {
         return false;
     }
 
     {
-        std::lock_guard<std::mutex> lock(buffer_pool_.pool_mutex_);
+        std::lock_guard<RankedMutex> lock(buffer_pool_.pool_mutex_);
         if (buffer_pool_.free_pages_.find(page_id) != buffer_pool_.free_pages_.end()) {
             return false;
         }
     }
-    WritePageGuard page_guard = buffer_pool_.FetchWrite(page_id);
-    WritePageGuard header_guard = buffer_pool_.FetchWrite(0);
-    auto* header = header_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
-    auto* body = page_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
-    const std::array<char, PAGE_DATA_SIZE> original_body = *page_guard.As<std::array<char, PAGE_DATA_SIZE>>();
-    const PageType original_type = page_guard.GetPageType();
-    const uint32_t old_head = ReadU32(header->data() + kFreeListHeadOffset);
-    WriteU32(body->data(), old_head);
-    page_guard.SetPageType(PageType::FREE);
-    if (buffer_pool_.HasActiveTransaction()) {
-        WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(page_id));
+    uint32_t old_head = 0;
+    {
+        ReadPageGuard header_guard = buffer_pool_.FetchRead(0);
+        const auto* header = header_guard.As<std::array<char, PAGE_DATA_SIZE>>();
+        old_head = ReadU32(header->data() + kFreeListHeadOffset);
+    }
+    const bool transaction_active = buffer_pool_.HasActiveTransaction();
+    std::array<char, PAGE_DATA_SIZE> original_body{};
+    PageType original_type = PageType::HEAP;
+    {
+        WritePageGuard page_guard = buffer_pool_.FetchWrite(page_id);
+        auto* body = page_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
+        original_body = *body;
+        original_type = page_guard.GetPageType();
+        WriteU32(body->data(), old_head);
+        page_guard.SetPageType(PageType::FREE);
+    }
+    if (transaction_active) {
+        {
+            WritePageGuard header_guard = buffer_pool_.FetchWrite(0);
+            auto* header = header_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
+            WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(page_id));
+        }
         buffer_pool_.RecordFreePageState(page_id, true);
         return true;
     }
-    try {
-        if (!buffer_pool_.RetirePage(page_guard)) {
-            *body = original_body;
-            page_guard.SetPageType(original_type);
-            return false;
-        }
-    } catch (...) {
-        *body = original_body;
+    if (!buffer_pool_.RetirePage(page_id)) {
+        WritePageGuard page_guard = buffer_pool_.FetchWrite(page_id);
+        *page_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>() = original_body;
         page_guard.SetPageType(original_type);
-        throw;
+        return false;
     }
-    WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(page_id));
+    {
+        WritePageGuard header_guard = buffer_pool_.FetchWrite(0);
+        auto* header = header_guard.AsMut<std::array<char, PAGE_DATA_SIZE>>();
+        WriteU32(header->data() + kFreeListHeadOffset, static_cast<uint32_t>(page_id));
+    }
     return true;
 }
 

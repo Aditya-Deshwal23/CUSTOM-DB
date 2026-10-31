@@ -22,10 +22,13 @@ class TransactionAwareWriteBackPolicy final : public WriteBackPolicy {
         if (!delegate_->CanWriteBack(page_id)) {
             return false;
         }
-        std::lock_guard<std::mutex> lock(buffer_pool_.pool_mutex_);
-        return !buffer_pool_.active_transaction_ ||
-               buffer_pool_.active_transaction_->before_images_.find(page_id) ==
-                   buffer_pool_.active_transaction_->before_images_.end();
+        std::lock_guard<RankedMutex> lock(buffer_pool_.pool_mutex_);
+        const std::shared_ptr<TxnContext> transaction = buffer_pool_.active_transaction_;
+        if (!transaction) {
+            return true;
+        }
+        std::lock_guard<RankedMutex> transaction_lock(transaction->state_mutex_);
+        return transaction->before_images_.find(page_id) == transaction->before_images_.end();
     }
 
     void BeforeWriteBack(page_id_t page_id, uint64_t lsn) override {
@@ -129,7 +132,7 @@ WritePageGuard BufferPoolManager::NewPageGuarded() {
 
 std::shared_ptr<TxnContext> BufferPoolManager::BeginTransaction(WriteAheadLog& wal) {
     wal.EnsureRecovered();
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     if (checkpoint_in_progress_) {
         throw DbError(ErrorCode::INVALID_ARGUMENT,
                       "Cannot begin a write transaction during a checkpoint");
@@ -145,6 +148,7 @@ std::shared_ptr<TxnContext> BufferPoolManager::BeginTransaction(WriteAheadLog& w
     wal_ = &wal;
     active_transaction_ =
         std::make_shared<TxnContext>(*this, wal, wal.GetNextTxnId(), disk_manager_->SizeInPages());
+    std::atomic_store(&active_transaction_snapshot_, active_transaction_);
     return active_transaction_;
 }
 
@@ -153,9 +157,12 @@ void BufferPoolManager::RegisterMutation(void* owner, Frame* frame) {
 }
 
 void BufferPoolManager::RegisterMutation(Frame* frame) {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
-    if (!active_transaction_ || active_transaction_->before_images_.find(frame->page_id) !=
-                                    active_transaction_->before_images_.end()) {
+    const std::shared_ptr<TxnContext> transaction = std::atomic_load(&active_transaction_snapshot_);
+    if (!transaction) {
+        return;
+    }
+    std::lock_guard<RankedMutex> lock(transaction->state_mutex_);
+    if (transaction->before_images_.find(frame->page_id) != transaction->before_images_.end()) {
         return;
     }
     PageBeforeImage before{};
@@ -165,16 +172,16 @@ void BufferPoolManager::RegisterMutation(Frame* frame) {
     before.lsn = frame->lsn;
     before.dirty = frame->dirty.load(std::memory_order_acquire);
     before.body = frame->data;
-    active_transaction_->before_images_.emplace(frame->page_id, std::move(before));
+    transaction->before_images_.emplace(frame->page_id, std::move(before));
 }
 
 bool BufferPoolManager::HasActiveTransaction() const {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     return static_cast<bool>(active_transaction_);
 }
 
 void BufferPoolManager::BeginCheckpoint(WriteAheadLog& wal) {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     if (checkpoint_in_progress_ || active_transaction_) {
         throw DbError(ErrorCode::INVALID_ARGUMENT,
                       "Cannot checkpoint while another checkpoint or write transaction is active");
@@ -188,15 +195,16 @@ void BufferPoolManager::BeginCheckpoint(WriteAheadLog& wal) {
 }
 
 void BufferPoolManager::EndCheckpoint() noexcept {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     checkpoint_in_progress_ = false;
 }
 
 void BufferPoolManager::RecordFreePageState(page_id_t page_id, bool will_be_free) {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     if (!active_transaction_) {
         return;
     }
+    std::lock_guard<RankedMutex> transaction_lock(active_transaction_->state_mutex_);
     if (active_transaction_->free_page_state_before_.find(page_id) ==
         active_transaction_->free_page_state_before_.end()) {
         active_transaction_->free_page_state_before_.emplace(
@@ -212,13 +220,18 @@ void BufferPoolManager::RecordFreePageState(page_id_t page_id, bool will_be_free
 void BufferPoolManager::CommitTransaction(TxnContext& transaction) {
     std::vector<WriteAheadLog::CommitPage> pages;
     std::vector<std::pair<Frame*, uint64_t>> stamped_frames;
-    pages.reserve(transaction.before_images_.size());
-    stamped_frames.reserve(transaction.before_images_.size());
+    std::unordered_map<page_id_t, PageBeforeImage> before_images;
+    {
+        std::lock_guard<RankedMutex> transaction_lock(transaction.state_mutex_);
+        before_images = transaction.before_images_;
+    }
+    pages.reserve(before_images.size());
+    stamped_frames.reserve(before_images.size());
 
-    for (const auto& entry : transaction.before_images_) {
+    for (const auto& entry : before_images) {
         Frame* frame = nullptr;
         {
-            std::lock_guard<std::mutex> lock(pool_mutex_);
+            std::lock_guard<RankedMutex> lock(pool_mutex_);
             const auto mapping = page_table_.find(entry.first);
             if (mapping == page_table_.end()) {
                 throw DbError(ErrorCode::PAGE_CORRUPT,
@@ -226,7 +239,7 @@ void BufferPoolManager::CommitTransaction(TxnContext& transaction) {
             }
             frame = &frames_[static_cast<size_t>(mapping->second)];
         }
-        std::unique_lock<std::shared_mutex> page_lock(frame->rwlatch);
+        std::unique_lock<RankedSharedMutex> page_lock(frame->rwlatch);
         WriteAheadLog::CommitPage image{};
         image.page_id = entry.first;
         image.type = frame->page_type;
@@ -240,25 +253,33 @@ void BufferPoolManager::CommitTransaction(TxnContext& transaction) {
                                            ? std::vector<uint64_t>{}
                                            : transaction.wal_->Commit(transaction.txn_id_, pages);
     for (size_t index = 0; index < stamped_frames.size(); ++index) {
-        std::unique_lock<std::shared_mutex> page_lock(stamped_frames[index].first->rwlatch);
+        std::unique_lock<RankedSharedMutex> page_lock(stamped_frames[index].first->rwlatch);
         stamped_frames[index].first->lsn = lsns[index];
         stamped_frames[index].first->dirty.store(true, std::memory_order_release);
     }
     {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
+        std::lock_guard<RankedMutex> lock(pool_mutex_);
         if (active_transaction_.get() != &transaction) {
             throw DbError(ErrorCode::PAGE_CORRUPT,
                           "Buffer-pool transaction ownership changed during commit");
         }
         active_transaction_.reset();
+        std::atomic_store(&active_transaction_snapshot_, std::shared_ptr<TxnContext>{});
     }
 }
 
 void BufferPoolManager::RollbackTransaction(TxnContext& transaction) noexcept {
-    for (const auto& entry : transaction.before_images_) {
+    std::unordered_map<page_id_t, PageBeforeImage> before_images;
+    std::unordered_map<page_id_t, bool> free_page_state_before;
+    {
+        std::lock_guard<RankedMutex> transaction_lock(transaction.state_mutex_);
+        before_images = transaction.before_images_;
+        free_page_state_before = transaction.free_page_state_before_;
+    }
+    for (const auto& entry : before_images) {
         Frame* frame = nullptr;
         {
-            std::lock_guard<std::mutex> lock(pool_mutex_);
+            std::lock_guard<RankedMutex> lock(pool_mutex_);
             const auto mapping = page_table_.find(entry.first);
             if (mapping != page_table_.end()) {
                 frame = &frames_[static_cast<size_t>(mapping->second)];
@@ -267,7 +288,7 @@ void BufferPoolManager::RollbackTransaction(TxnContext& transaction) noexcept {
         if (frame == nullptr) {
             continue;
         }
-        std::unique_lock<std::shared_mutex> page_lock(frame->rwlatch);
+        std::unique_lock<RankedSharedMutex> page_lock(frame->rwlatch);
         frame->data = entry.second.body;
         frame->page_type = entry.second.type;
         frame->page_flags = entry.second.flags;
@@ -275,8 +296,8 @@ void BufferPoolManager::RollbackTransaction(TxnContext& transaction) noexcept {
         frame->dirty.store(entry.second.dirty, std::memory_order_release);
     }
     {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
-        for (const auto& entry : transaction.free_page_state_before_) {
+        std::lock_guard<RankedMutex> lock(pool_mutex_);
+        for (const auto& entry : free_page_state_before) {
             if (entry.second) {
                 free_pages_.insert(entry.first);
             } else {
@@ -285,6 +306,7 @@ void BufferPoolManager::RollbackTransaction(TxnContext& transaction) noexcept {
         }
         if (active_transaction_.get() == &transaction) {
             active_transaction_.reset();
+            std::atomic_store(&active_transaction_snapshot_, std::shared_ptr<TxnContext>{});
         }
     }
     disk_manager_->RestorePageCount(transaction.page_count_before_);
@@ -295,7 +317,8 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
         throw DbError(ErrorCode::INVALID_ARGUMENT, "Page ID cannot be negative", page_id);
     }
     if (static_cast<uint64_t>(page_id) >= disk_manager_->SizeInPages()) {
-        throw DbError(ErrorCode::PAGE_OUT_OF_RANGE, "Page ID is outside the database file", page_id);
+        throw DbError(ErrorCode::PAGE_OUT_OF_RANGE, "Page ID is outside the database file",
+                      page_id);
     }
 
     bool recorded_miss = false;
@@ -312,7 +335,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
         std::shared_ptr<WriteBackPolicy> policy;
         WriteAheadLog* wal = nullptr;
         {
-            std::unique_lock<std::mutex> lock(pool_mutex_);
+            std::unique_lock<RankedMutex> lock(pool_mutex_);
             const auto write_back = in_flight_write_backs_.find(page_id);
             if (write_back != in_flight_write_backs_.end()) {
                 const frame_id_t pending_frame_id = write_back->second;
@@ -331,9 +354,9 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                     throw DbError(ErrorCode::PAGE_OUT_OF_RANGE,
                                   "Page ID has been deleted and is on the free list", page_id);
                 }
-                if (active_transaction_ &&
-                    active_transaction_->free_page_state_before_.find(page_id) ==
-                        active_transaction_->free_page_state_before_.end()) {
+                if (active_transaction_) {
+                    std::lock_guard<RankedMutex> transaction_lock(
+                        active_transaction_->state_mutex_);
                     active_transaction_->free_page_state_before_.emplace(page_id, true);
                 }
                 free_pages_.erase(free_page);
@@ -393,9 +416,14 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                               "All buffer-pool frames are pinned or unavailable", page_id);
             }
             Frame* candidate = &frames_[static_cast<size_t>(frame_id)];
-            if (!took_free_frame && candidate->page_id != INVALID_PAGE_ID && active_transaction_ &&
-                active_transaction_->before_images_.find(candidate->page_id) !=
-                    active_transaction_->before_images_.end()) {
+            bool candidate_protected = false;
+            if (!took_free_frame && candidate->page_id != INVALID_PAGE_ID && active_transaction_) {
+                std::lock_guard<RankedMutex> transaction_lock(active_transaction_->state_mutex_);
+                candidate_protected =
+                    active_transaction_->before_images_.find(candidate->page_id) !=
+                    active_transaction_->before_images_.end();
+            }
+            if (candidate_protected) {
                 std::vector<frame_id_t> protected_frames{frame_id};
                 frame_id = -1;
                 while (protected_frames.size() <= frames_.size()) {
@@ -404,9 +432,15 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                         break;
                     }
                     Frame& next_candidate = frames_[static_cast<size_t>(next_candidate_id)];
-                    if (next_candidate.page_id == INVALID_PAGE_ID || !active_transaction_ ||
-                        active_transaction_->before_images_.find(next_candidate.page_id) ==
-                            active_transaction_->before_images_.end()) {
+                    bool protected_by_transaction = false;
+                    if (next_candidate.page_id != INVALID_PAGE_ID && active_transaction_) {
+                        std::lock_guard<RankedMutex> transaction_lock(
+                            active_transaction_->state_mutex_);
+                        protected_by_transaction =
+                            active_transaction_->before_images_.find(next_candidate.page_id) !=
+                            active_transaction_->before_images_.end();
+                    }
+                    if (next_candidate.page_id == INVALID_PAGE_ID || !protected_by_transaction) {
                         frame_id = next_candidate_id;
                         frame = &next_candidate;
                         break;
@@ -472,7 +506,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                 write_back_completed = true;
                 dirty_write_backs_.fetch_add(1, std::memory_order_relaxed);
                 frame->dirty.store(false, std::memory_order_release);
-                std::lock_guard<std::mutex> lock(pool_mutex_);
+                std::lock_guard<RankedMutex> lock(pool_mutex_);
                 frame->io_state = IoState::LOADING;
             }
             PageType loaded_type = PageType::HEAP;
@@ -483,16 +517,16 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
             frame->page_type = loaded_type;
             frame->page_flags = loaded_flags;
             frame->lsn = loaded_lsn;
-            if (mode == GuardMode::READ) {
-                frame->rwlatch.lock_shared();
-                latch_acquired = true;
-            } else if (mode == GuardMode::WRITE) {
-                frame->rwlatch.lock();
-                latch_acquired = true;
-                RegisterMutation(frame);
-            }
             {
-                std::lock_guard<std::mutex> lock(pool_mutex_);
+                std::lock_guard<RankedMutex> lock(pool_mutex_);
+                if (mode == GuardMode::READ) {
+                    frame->rwlatch.lock_shared();
+                    latch_acquired = true;
+                } else if (mode == GuardMode::WRITE) {
+                    frame->rwlatch.lock();
+                    latch_acquired = true;
+                    RegisterMutation(frame);
+                }
                 if (evicted_dirty) {
                     in_flight_write_backs_.erase(evicted_page_id);
                 }
@@ -511,7 +545,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
             } else if (latch_acquired && mode == GuardMode::WRITE) {
                 frame->rwlatch.unlock();
             }
-            std::lock_guard<std::mutex> lock(pool_mutex_);
+            std::lock_guard<RankedMutex> lock(pool_mutex_);
             const auto mapping = page_table_.find(page_id);
             if (mapping != page_table_.end() && mapping->second == frame_id) {
                 page_table_.erase(mapping);
@@ -552,68 +586,76 @@ WritePageGuard BufferPoolManager::AllocateFreePageGuarded(page_id_t page_id) {
     return Fetch(page_id, GuardMode::WRITE, true);
 }
 
-bool BufferPoolManager::RetirePage(WritePageGuard& guard) {
-    Frame* frame = guard.FramePointer();
-    const page_id_t page_id = guard.GetPageId();
-    const frame_id_t frame_id = guard.GetFrameId();
+bool BufferPoolManager::RetirePage(page_id_t page_id) {
+    Frame* frame = nullptr;
+    frame_id_t frame_id = -1;
+    uint64_t lsn = 0;
     std::shared_ptr<WriteBackPolicy> policy;
     WriteAheadLog* wal = nullptr;
     {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
+        std::lock_guard<RankedMutex> lock(pool_mutex_);
         const auto mapping = page_table_.find(page_id);
-        if (mapping == page_table_.end() || mapping->second != frame_id ||
-            frame->pin_count.load(std::memory_order_acquire) != 1 ||
+        if (mapping == page_table_.end()) {
+            return false;
+        }
+        frame_id = mapping->second;
+        frame = &frames_[static_cast<size_t>(frame_id)];
+        if (frame->pin_count.load(std::memory_order_acquire) != 0 ||
             frame->io_state != IoState::READY) {
             return false;
         }
+        frame->pin_count.store(1, std::memory_order_release);
+        replacer_->Pin(frame_id);
         free_pages_.insert(page_id);
         frame->io_state = IoState::WRITING_BACK;
+        lsn = frame->lsn;
         policy = write_back_policy_;
         wal = wal_;
     }
 
+    std::unique_lock<RankedSharedMutex> page_lock(frame->rwlatch, std::defer_lock);
     try {
         if (!policy->CanWriteBack(page_id)) {
-            std::lock_guard<std::mutex> lock(pool_mutex_);
+            std::lock_guard<RankedMutex> lock(pool_mutex_);
             free_pages_.erase(page_id);
             frame->io_state = IoState::READY;
+            frame->pin_count.store(0, std::memory_order_release);
+            replacer_->Unpin(frame_id);
             frame->condition.notify_all();
             return false;
         }
-        policy->BeforeWriteBack(page_id, frame->lsn);
+        policy->BeforeWriteBack(page_id, lsn);
+        page_lock.lock();
+        const PageType type = frame->page_type;
+        const uint16_t flags = frame->page_flags;
         if (wal != nullptr) {
-            wal->EnsureDurable(frame->lsn);
+            wal->EnsureDurable(lsn);
         }
-        disk_manager_->WritePage(page_id, frame->data.data(), frame->page_type, frame->page_flags,
-                                 frame->lsn);
+        disk_manager_->WritePage(page_id, frame->data.data(), type, flags, lsn);
+        page_lock.unlock();
     } catch (...) {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
+        if (page_lock.owns_lock()) {
+            page_lock.unlock();
+        }
+        std::lock_guard<RankedMutex> lock(pool_mutex_);
         free_pages_.erase(page_id);
         frame->io_state = IoState::READY;
+        frame->pin_count.store(0, std::memory_order_release);
+        replacer_->Unpin(frame_id);
         frame->condition.notify_all();
         throw;
     }
 
     {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
+        std::lock_guard<RankedMutex> lock(pool_mutex_);
         page_table_.erase(page_id);
         frame->page_id = INVALID_PAGE_ID;
         frame->dirty.store(false, std::memory_order_release);
         frame->pin_count.store(0, std::memory_order_release);
         frame->io_state = IoState::READY;
         free_list_.push_back(frame_id);
-        replacer_->Pin(frame_id);
-        const auto thread_pin = thread_pins_.find(guard.origin_thread_);
-        if (thread_pin != thread_pins_.end()) {
-            if (thread_pin->second <= 1) {
-                thread_pins_.erase(thread_pin);
-            } else {
-                --thread_pin->second;
-            }
-        }
         dirty_write_backs_.fetch_add(1, std::memory_order_relaxed);
     }
-    guard.Disarm();
     frame->condition.notify_all();
     return true;
 }
@@ -629,7 +671,7 @@ void BufferPoolManager::RegisterPinLocked(std::thread::id origin_thread) {
 
 void BufferPoolManager::ReleaseFrame(Frame* frame, bool dirty,
                                      std::thread::id origin_thread) noexcept {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     if (dirty) {
         frame->dirty.store(true, std::memory_order_release);
     }
@@ -656,34 +698,40 @@ void BufferPoolManager::SetWriteBackPolicy(std::shared_ptr<WriteBackPolicy> poli
     if (!policy) {
         throw DbError(ErrorCode::INVALID_ARGUMENT, "Write-back policy cannot be null");
     }
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     write_back_policy_ =
         std::make_shared<TransactionAwareWriteBackPolicy>(*this, std::move(policy));
 }
 
 void BufferPoolManager::FlushFrame(Frame* frame) {
-    std::unique_lock<std::shared_mutex> page_lock(frame->rwlatch);
-    if (!frame->dirty.load(std::memory_order_acquire)) {
-        return;
-    }
-
-    page_id_t page_id;
-    uint64_t lsn;
     std::shared_ptr<WriteBackPolicy> policy;
     WriteAheadLog* wal = nullptr;
     {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
-        page_id = frame->page_id;
-        lsn = frame->lsn;
-        if (active_transaction_ && active_transaction_->before_images_.find(page_id) !=
-                                       active_transaction_->before_images_.end()) {
-            return;
-        }
+        std::lock_guard<RankedMutex> lock(pool_mutex_);
         policy = write_back_policy_;
         wal = wal_;
     }
+
+    const page_id_t page_id = frame->page_id;
     if (!policy->CanWriteBack(page_id)) {
         return;
+    }
+    uint64_t lsn = 0;
+    std::unique_lock<RankedSharedMutex> page_lock(frame->rwlatch, std::defer_lock);
+    {
+        std::lock_guard<RankedMutex> lock(pool_mutex_);
+        page_lock.lock();
+        if (frame->page_id != page_id || !frame->dirty.load(std::memory_order_acquire)) {
+            return;
+        }
+        lsn = frame->lsn;
+        if (active_transaction_) {
+            std::lock_guard<RankedMutex> transaction_lock(active_transaction_->state_mutex_);
+            if (active_transaction_->before_images_.find(page_id) !=
+                active_transaction_->before_images_.end()) {
+                return;
+            }
+        }
     }
     policy->BeforeWriteBack(page_id, lsn);
     if (wal != nullptr) {
@@ -703,7 +751,7 @@ bool BufferPoolManager::FlushPage(page_id_t page_id) {
     PageGuard guard;
     Frame* selected = nullptr;
     {
-        std::unique_lock<std::mutex> lock(pool_mutex_);
+        std::unique_lock<RankedMutex> lock(pool_mutex_);
         for (;;) {
             const auto mapping = page_table_.find(page_id);
             if (mapping == page_table_.end()) {
@@ -737,7 +785,7 @@ void BufferPoolManager::FlushAll() {
     std::vector<std::pair<Frame*, PageGuard>> pinned;
     pinned.reserve(frames_.size());
     {
-        std::unique_lock<std::mutex> lock(pool_mutex_);
+        std::unique_lock<RankedMutex> lock(pool_mutex_);
         if (active_transaction_) {
             throw DbError(ErrorCode::TXN_TOO_LARGE,
                           "Cannot flush the buffer pool during an active transaction");
@@ -787,7 +835,7 @@ BufferPoolStats BufferPoolManager::SnapshotStats() const {
 }
 
 std::vector<FrameInfo> BufferPoolManager::Snapshot() const {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     const size_t count = std::min(frames_.size(), size_t{4096});
     std::vector<FrameInfo> snapshot;
     snapshot.reserve(count);
@@ -804,14 +852,14 @@ std::vector<FrameInfo> BufferPoolManager::Snapshot() const {
 }
 
 size_t BufferPoolManager::pinned_frames() const {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     return static_cast<size_t>(std::count_if(
         frames_.begin(), frames_.end(),
         [](const Frame& frame) { return frame.pin_count.load(std::memory_order_relaxed) > 0; }));
 }
 
 void BufferPoolManager::AssertNoPinsHeld() const {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
     const auto pins = thread_pins_.find(std::this_thread::get_id());
     if (pins != thread_pins_.end() && pins->second != 0) {
         throw DbError(

@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "concurrency.h"
 #include "disk_manager.h"
 
 namespace relational_db {
@@ -63,6 +64,7 @@ class TxnContext {
     uint64_t txn_id_;
     uint64_t page_count_before_;
     bool completed_{false};
+    mutable RankedMutex state_mutex_{LockRank::FRAME_LATCH};
     std::unordered_map<page_id_t, PageBeforeImage> before_images_;
     std::unordered_map<page_id_t, bool> free_page_state_before_;
 };
@@ -129,9 +131,9 @@ class WriteAheadLog {
     bool recovered_{false};
     bool stop_sync_thread_{false};
     std::string sync_error_;
-    std::condition_variable sync_condition_;
+    std::condition_variable_any sync_condition_;
     std::thread sync_thread_;
-    mutable std::mutex latch_;
+    mutable RankedMutex latch_{LockRank::DISK_WAL};
 };
 
 class FailPoint {

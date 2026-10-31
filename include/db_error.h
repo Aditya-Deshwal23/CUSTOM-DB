@@ -29,6 +29,7 @@ enum class ErrorCode {
     QUERY_TIMEOUT,
     RESULT_LIMIT_EXCEEDED,
     SORT_LIMIT_EXCEEDED,
+    BUSY,
     IO_ERROR
 };
 

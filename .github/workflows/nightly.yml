@@ -6,6 +6,21 @@ on:
   workflow_dispatch:
 
 jobs:
+  concurrency-tsan-stress:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ThreadSanitizer build
+        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=thread -DRELDB_WERROR=ON
+      - name: Build regression tests
+        run: cmake --build build-tsan --parallel --target reldb_regression_tests
+      - name: Prepare TSan runtime
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Run 60-second seeded SQL concurrency stress
+        env:
+          RELDB_CONCURRENCY_STRESS_SECONDS: "60"
+        run: build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress
+
   crash-safety:
     runs-on: ubuntu-24.04
     steps:

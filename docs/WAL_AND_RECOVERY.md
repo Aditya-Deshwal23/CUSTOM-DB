@@ -10,11 +10,11 @@ or write-back.
 ## Commit and checkpoint order
 
 Before commit, page after-images are assigned LSNs and encoded with CRC32C.
-The images and COMMIT record are assembled into one batch write. In `full`
-mode, the WAL is fdatasynced before the commit returns. In `normal` mode, a
-periodic timer syncs pending WAL records within `WAL_SYNC_INTERVAL_MS`; a page
-write-back first syncs its WAL through the page's LSN if needed. In `off` mode
-those guarantees are deliberately disabled and `ALLOW_UNSAFE=1` is required.
+The images and COMMIT record are assembled into one batch write and the WAL is
+synced before every commit returns, independent of mode. `normal` additionally
+runs a periodic sync thread; `off` disables that thread but does not disable
+per-statement durability. A committed page is eligible for write-back only
+after its COMMIT record is durable.
 
 Checkpointing takes the buffer-pool checkpoint gate before flushing. It writes
 all dirty pages, syncs the database, writes and syncs a CHECKPOINT record,
@@ -45,9 +45,9 @@ production error handling.
 |---|---|---|
 | `page_image_before` | The current batch has not yet been written; earlier statements remain committed | No partial transaction record is visible; replay uses only committed valid records |
 | `page_image_after` | The image was added to the in-memory commit batch, but that batch has not yet been written | As above; an unpersisted batch cannot be replayed |
-| `commit_after` | The complete batch, including COMMIT, was written but may not be synced | Recovery accepts it only if the complete records and CRCs survived; replay is all-or-nothing |
+| `commit_after` | The complete batch, including COMMIT, was written but has not yet been synced | The statement has not returned; recovery accepts it only if the complete records and CRCs survived |
 | `wal_fsync_after` | The commit WAL batch has been synced | Its COMMIT is durable, so all of its page images are replayed |
-| `writeback_mid` | A database page write is torn; the WAL COMMIT is already durable except in explicitly unsafe `off` mode | The page checksum fails on read, and recovery rewrites the complete committed page image |
+| `writeback_mid` | A database page write is torn; the WAL COMMIT is already durable | The page checksum fails on read, and recovery rewrites the complete committed page image |
 | `checkpoint_db_fsync_after` | All database pages are synced; the old WAL is still present | Replaying already-applied images is idempotent |
 | `checkpoint_before_truncate` | The database is synced and a CHECKPOINT record is appended/synced; WAL replacement has not begun | Recovery can replay the previous committed page images before truncating |
 | `wal_before_truncate` | The database is synced after recovery replay; the WAL still contains its pre-recovery records | The next startup repeats the same idempotent replay |

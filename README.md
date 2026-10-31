@@ -17,7 +17,7 @@ CUSTOM-DB is a C++17 storage-engine prototype with a Crow HTTP service and a van
 ### Prototype
 
 - The WAL-backed executor runs each write statement as a single-writer auto-commit transaction. It logs full-page after-images and a COMMIT record to `<DB_PATH>-wal`, restores before-images on statement failure, and replays committed changes before serving requests.
-- `DURABILITY=full` (default) syncs the WAL on every commit. `normal` syncs on `WAL_SYNC_INTERVAL_MS` (default 1000 ms) and before a corresponding page can be written back; recently acknowledged statements can be lost within the configured interval. `off` is unsafe benchmark-only mode and requires `ALLOW_UNSAFE=1`.
+- Every write statement syncs its WAL COMMIT before returning, regardless of `DURABILITY`. `full` is the default, `normal` also runs periodic background syncs using `WAL_SYNC_INTERVAL_MS` (default 1000 ms), and legacy `off` mode disables only that background thread.
 - `/api/metrics` returns zeros with `source: "uninstrumented"` until Phase 10 instrumentation is implemented.
 - The dashboard's schema visualization and simulation trace are illustrative. Simulation mode shows a persistent warning; real query plans are available through SQL `EXPLAIN`.
 - Database pages and WAL records use explicit little-endian layouts and CRC32C. Checkpointing syncs dirty database pages before truncating the WAL.
@@ -26,11 +26,10 @@ CUSTOM-DB is a C++17 storage-engine prototype with a Crow HTTP service and a van
 ### Not implemented
 
 - General SQL, joins, foreign keys, composite indexes, multi-statement transactions, and general transaction isolation. The SQL catalog currently fits on one page; VARCHAR index ordering and ranges are not supported.
-- Durable acknowledgment when `DURABILITY=normal` or `off`; use `full` for per-commit WAL sync.
 - A user-facing `--check` command (planned for Phase 13), or writer latch crabbing.
 - Production-grade concurrency, performance, or durability guarantees.
 
-See [docs/CLAIMS.md](docs/CLAIMS.md) for claim-by-claim evidence and [docs/RESUME_EVIDENCE_REPORT.md](docs/RESUME_EVIDENCE_REPORT.md) for the existing local audit.
+See [docs/CLAIMS.md](docs/CLAIMS.md) for claim-by-claim evidence, [docs/CONCURRENCY.md](docs/CONCURRENCY.md) for the statement-level concurrency model, [docs/adr/0002-concurrency.md](docs/adr/0002-concurrency.md) for its design decision, and [docs/RESUME_EVIDENCE_REPORT.md](docs/RESUME_EVIDENCE_REPORT.md) for the existing local audit.
 The disk and WAL formats are documented in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md), recovery behavior in [docs/WAL_AND_RECOVERY.md](docs/WAL_AND_RECOVERY.md), the design decision in [docs/adr/0001-wal-design.md](docs/adr/0001-wal-design.md), and measured local benchmarks in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Routes

@@ -1,14 +1,14 @@
 #ifndef PAGE_H
 #define PAGE_H
 
-#include "config.h"
-#include "disk_manager.h"
-
 #include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
-#include <shared_mutex>
+
+#include "concurrency.h"
+#include "config.h"
+#include "disk_manager.h"
 
 namespace relational_db {
 
@@ -21,9 +21,9 @@ struct Frame {
     page_id_t page_id{INVALID_PAGE_ID};
     PageType page_type{PageType::HEAP};
     uint16_t page_flags{0};
-    std::shared_mutex rwlatch;
+    RankedSharedMutex rwlatch{LockRank::FRAME_LATCH};
     IoState io_state{IoState::READY};
-    std::condition_variable condition;
+    std::condition_variable_any condition;
     uint64_t lsn{0};
 
     Frame() = default;

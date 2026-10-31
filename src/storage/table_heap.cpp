@@ -70,7 +70,7 @@ bool TableIterator::Next(RID& rid, Tuple& tuple) {
         return false;
     }
     for (;;) {
-        if (!page_guard_) {
+        if (current_page_id_ == INVALID_PAGE_ID) {
             if (next_page_id_ == INVALID_PAGE_ID) {
                 return false;
             }
@@ -79,12 +79,20 @@ bool TableIterator::Next(RID& rid, Tuple& tuple) {
                               next_page_id_);
             }
             current_page_id_ = next_page_id_;
-            page_guard_ = buffer_pool_->FetchRead(current_page_id_);
             next_slot_ = 0;
+            page_loaded_ = false;
+        }
+        if (current_page_id_ <= 0) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid page in table-heap scan",
+                          current_page_id_);
+        }
+        if (!page_loaded_) {
+            ReadPageGuard page_guard = buffer_pool_->FetchRead(current_page_id_);
+            page_data_ = *page_guard.As<std::array<char, PAGE_DATA_SIZE>>();
+            page_loaded_ = true;
         }
 
-        const auto* body = page_guard_.As<std::array<char, PAGE_DATA_SIZE>>();
-        const SlottedPage page(body->data());
+        const SlottedPage page(page_data_.data());
         const uint16_t slot_count = page.GetNumSlots();
         while (next_slot_ < slot_count) {
             const uint16_t slot_id = next_slot_++;
@@ -94,8 +102,8 @@ bool TableIterator::Next(RID& rid, Tuple& tuple) {
             }
         }
         next_page_id_ = page.GetNextPageId();
-        page_guard_.Drop();
         current_page_id_ = INVALID_PAGE_ID;
+        page_loaded_ = false;
         if (next_page_id_ != INVALID_PAGE_ID && next_page_id_ <= 0) {
             throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid next page in table-heap scan",
                           next_page_id_);

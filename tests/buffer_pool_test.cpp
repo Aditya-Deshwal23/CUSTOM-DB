@@ -25,6 +25,7 @@
 
 namespace {
 
+using relational_db::BasicPageGuard;
 using relational_db::BufferPoolManager;
 using relational_db::DbError;
 using relational_db::ErrorCode;
@@ -243,7 +244,7 @@ TEST(BufferPoolGuardTest, GuardsOwnPinsAndMoveWithoutLeaking) {
     auto disk = std::make_shared<FileDiskManager>(database.String());
     BufferPoolManager pool(16, disk);
     {
-        auto guard = pool.FetchRead(0);
+        auto guard = pool.FetchBasic(0);
         EXPECT_EQ(guard.GetPageId(), 0);
         EXPECT_EQ(pool.pinned_frames(), 1U);
         const auto snapshot = pool.Snapshot();
@@ -422,10 +423,10 @@ TEST(BufferPoolManagerTest, ThrowsTypedErrorWhenAllFramesArePinned) {
     auto disk = std::make_shared<FileDiskManager>(database.String());
     disk->Extend(20);
     BufferPoolManager pool(16, disk);
-    std::vector<relational_db::ReadPageGuard> pinned;
+    std::vector<BasicPageGuard> pinned;
     pinned.reserve(16);
     for (relational_db::page_id_t page_id = 1; page_id <= 16; ++page_id) {
-        pinned.push_back(pool.FetchRead(page_id));
+        pinned.push_back(pool.FetchBasic(page_id));
     }
 
     try {

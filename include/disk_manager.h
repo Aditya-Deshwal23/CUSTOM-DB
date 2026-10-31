@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 
+#include "concurrency.h"
 #include "config.h"
 
 namespace relational_db {
@@ -74,8 +75,12 @@ class IDiskManager {
     virtual void Sync() = 0;
     virtual uint64_t SizeInPages() const = 0;
     virtual void Extend(uint64_t page_count) = 0;
-    virtual void ReservePages(uint64_t page_count) { Extend(page_count); }
-    virtual void RestorePageCount(uint64_t page_count) noexcept { (void)page_count; }
+    virtual void ReservePages(uint64_t page_count) {
+        Extend(page_count);
+    }
+    virtual void RestorePageCount(uint64_t page_count) noexcept {
+        (void)page_count;
+    }
     virtual DiskStats Stats() const = 0;
 };
 
@@ -119,8 +124,8 @@ class FileDiskManager final : public IDiskManager {
     bool allow_wal_recovery_{false};
     int file_descriptor_{-1};
     std::atomic<uint64_t> page_count_{0};
-    mutable std::mutex open_mutex_;
-    mutable std::mutex header_mutex_;
+    mutable RankedMutex open_mutex_{LockRank::DISK_WAL};
+    mutable RankedMutex header_mutex_{LockRank::DISK_WAL};
     std::atomic<bool> opened_{false};
     std::atomic<uint64_t> reads_{0};
     std::atomic<uint64_t> writes_{0};

@@ -1,16 +1,14 @@
 #ifndef RELDB_SQL_EXECUTOR_H
 #define RELDB_SQL_EXECUTOR_H
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <memory>
-#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "catalog.h"
+#include "concurrency.h"
 #include "wal.h"
 
 namespace relational_db {
@@ -32,20 +30,6 @@ class OperatorStatsSink {
 
    private:
     std::vector<OperatorMetrics> metrics_;
-};
-
-class CancellationToken {
-   public:
-    explicit CancellationToken(std::chrono::steady_clock::time_point deadline =
-                                   std::chrono::steady_clock::now() +
-                                   std::chrono::milliseconds(STATEMENT_TIMEOUT_MS));
-
-    void Cancel() noexcept;
-    void Check() const;
-
-   private:
-    std::atomic<bool> cancelled_{false};
-    std::chrono::steady_clock::time_point deadline_;
 };
 
 struct ExecutionContext {
@@ -79,7 +63,7 @@ class VolcanoOperator {
 class SqlExecutionEngine {
    public:
     SqlExecutionEngine(std::shared_ptr<BufferPoolManager> buffer_pool, WriteAheadLog* wal,
-                       std::shared_mutex& statement_gate, page_id_t owner_meta_page_id);
+                       WriterPreferringSharedMutex& statement_gate, page_id_t owner_meta_page_id);
     ~SqlExecutionEngine();
     SqlExecutionEngine(const SqlExecutionEngine&) = delete;
     SqlExecutionEngine& operator=(const SqlExecutionEngine&) = delete;

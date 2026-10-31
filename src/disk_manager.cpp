@@ -40,7 +40,7 @@ constexpr size_t kHeaderCrcOffset = kCatalogRootOffset + 4;
 constexpr size_t kDatabaseHeaderSerializedSize = kHeaderCrcOffset + 4 - kDatabaseHeaderOffset;
 constexpr uint8_t kMagic[8] = {'R', 'E', 'L', 'D', 'B', 0, 0, 2};
 #ifdef _WIN32
-std::mutex g_windows_io_mutex;
+RankedMutex g_windows_io_mutex{LockRank::DISK_WAL};
 #endif
 
 struct DatabaseHeaderLayout {
@@ -148,7 +148,8 @@ FileDiskManager::~FileDiskManager() {
 }
 
 void FileDiskManager::Open() {
-    std::lock_guard<std::mutex> open_lock(open_mutex_);
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
+    std::lock_guard<RankedMutex> open_lock(open_mutex_);
     if (opened_.load(std::memory_order_acquire)) {
         return;
     }
@@ -195,17 +196,16 @@ void FileDiskManager::Open() {
             try {
                 ValidateExistingFile();
             } catch (const DbError& error) {
-                if (!allow_wal_recovery_ ||
-                    (error.Code() != ErrorCode::INVALID_DB_FILE &&
-                     error.Code() != ErrorCode::HEADER_CORRUPT &&
-                     error.Code() != ErrorCode::PAGE_CHECKSUM_MISMATCH)) {
+                if (!allow_wal_recovery_ || (error.Code() != ErrorCode::INVALID_DB_FILE &&
+                                             error.Code() != ErrorCode::HEADER_CORRUPT &&
+                                             error.Code() != ErrorCode::PAGE_CHECKSUM_MISMATCH)) {
                     throw;
                 }
 #ifdef _WIN32
                 const __int64 size = _filelengthi64(file_descriptor_);
                 const uint64_t existing_size = size < 0 ? 0 : static_cast<uint64_t>(size);
 #else
-                struct stat status {};
+                struct stat status{};
                 if (fstat(file_descriptor_, &status) != 0) {
                     throw DbError(ErrorCode::IO_ERROR, IoErrorMessage("stat database file"));
                 }
@@ -316,6 +316,7 @@ void FileDiskManager::WriteDatabaseHeader(uint64_t page_count) {
 }
 
 void FileDiskManager::GrowPhysicalFile(uint64_t logical_page_count) {
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
     const uint64_t rounded_pages =
         ((logical_page_count + kGrowthPages - 1) / kGrowthPages) * kGrowthPages;
     if (rounded_pages > std::numeric_limits<uint64_t>::max() / PAGE_SIZE) {
@@ -345,10 +346,11 @@ void FileDiskManager::GrowPhysicalFile(uint64_t logical_page_count) {
 }
 
 void FileDiskManager::ReadExact(uint64_t offset, char* buffer, size_t length, page_id_t page_id) {
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
     const auto start = std::chrono::steady_clock::now();
     size_t transferred = 0;
 #ifdef _WIN32
-    std::lock_guard<std::mutex> io_lock(g_windows_io_mutex);
+    std::lock_guard<RankedMutex> io_lock(g_windows_io_mutex);
     if (_lseeki64(file_descriptor_, static_cast<__int64>(offset), SEEK_SET) < 0) {
         throw DbError(ErrorCode::IO_ERROR, IoErrorMessage("seek database file"), page_id);
     }
@@ -386,10 +388,11 @@ void FileDiskManager::ReadExact(uint64_t offset, char* buffer, size_t length, pa
 }
 
 void FileDiskManager::WriteExact(uint64_t offset, const char* buffer, size_t length) {
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
     const auto start = std::chrono::steady_clock::now();
     size_t transferred = 0;
 #ifdef _WIN32
-    std::lock_guard<std::mutex> io_lock(g_windows_io_mutex);
+    std::lock_guard<RankedMutex> io_lock(g_windows_io_mutex);
     if (_lseeki64(file_descriptor_, static_cast<__int64>(offset), SEEK_SET) < 0) {
         throw DbError(ErrorCode::IO_ERROR, IoErrorMessage("seek database file"));
     }
@@ -437,8 +440,8 @@ void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& typ
     ReadPage(page_id, page_data, type, flags, lsn);
 }
 
-void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& type,
-                               uint16_t& flags, uint64_t& lsn) {
+void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& type, uint16_t& flags,
+                               uint64_t& lsn) {
     if (page_id < 0 || static_cast<uint64_t>(page_id) >= SizeInPages()) {
         throw DbError(ErrorCode::PAGE_OUT_OF_RANGE, "Page ID is outside the database file",
                       page_id);
@@ -447,7 +450,7 @@ void FileDiskManager::ReadPage(page_id_t page_id, char* page_data, PageType& typ
         throw DbError(ErrorCode::IO_ERROR, "ReadPage requires a non-null output buffer", page_id);
     }
 
-    std::unique_lock<std::mutex> header_lock(header_mutex_, std::defer_lock);
+    std::unique_lock<RankedMutex> header_lock(header_mutex_, std::defer_lock);
     if (page_id == 0) {
         header_lock.lock();
     }
@@ -500,7 +503,8 @@ void FileDiskManager::WritePage(page_id_t page_id, const char* page_data, PageTy
     if (FailPoint::IsConfigured("writeback_mid", "kill") ||
         FailPoint::IsConfigured("writeback_mid", "exit") ||
         FailPoint::IsConfigured("writeback_mid", "throw")) {
-        WriteExact(PageOffset(page_id), reinterpret_cast<const char*>(image.data()), PAGE_SIZE / 2U);
+        WriteExact(PageOffset(page_id), reinterpret_cast<const char*>(image.data()),
+                   PAGE_SIZE / 2U);
         FailPoint::Hit("writeback_mid");
     }
     WriteExact(PageOffset(page_id), reinterpret_cast<const char*>(image.data()), image.size());
@@ -515,7 +519,7 @@ void FileDiskManager::WriteHeaderPage(const char* page_data, uint16_t flags, uin
         throw DbError(ErrorCode::INVALID_ARGUMENT, "WriteHeaderPage requires a non-null input");
     }
 
-    std::lock_guard<std::mutex> lock(header_mutex_);
+    std::lock_guard<RankedMutex> lock(header_mutex_);
     std::array<uint8_t, PAGE_SIZE> image{};
     ReadExact(0, reinterpret_cast<char*>(image.data()), image.size(), 0);
     PutU16(image.data() + 6, flags);
@@ -553,7 +557,7 @@ void FileDiskManager::WritePageImage(page_id_t page_id, const uint8_t* image) {
         }
     }
 
-    std::lock_guard<std::mutex> header_lock(header_mutex_);
+    std::lock_guard<RankedMutex> header_lock(header_mutex_);
     const uint64_t required_pages = static_cast<uint64_t>(page_id) + 1U;
     if (required_pages > page_count_.load(std::memory_order_relaxed)) {
         GrowPhysicalFile(required_pages);
@@ -567,6 +571,7 @@ void FileDiskManager::WritePageImage(page_id_t page_id, const uint8_t* image) {
 }
 
 void FileDiskManager::Sync() {
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
     const auto start = std::chrono::steady_clock::now();
 #ifdef _WIN32
     if (_commit(file_descriptor_) != 0) {
@@ -596,7 +601,7 @@ void FileDiskManager::Extend(uint64_t page_count) {
     if (page_count == 0) {
         return;
     }
-    std::lock_guard<std::mutex> lock(header_mutex_);
+    std::lock_guard<RankedMutex> lock(header_mutex_);
     const uint64_t current = page_count_.load(std::memory_order_relaxed);
     const uint64_t maximum = static_cast<uint64_t>(std::numeric_limits<page_id_t>::max()) + 1U;
     if (page_count > maximum - current) {
@@ -618,7 +623,7 @@ void FileDiskManager::ReservePages(uint64_t page_count) {
     if (page_count == 0) {
         return;
     }
-    std::lock_guard<std::mutex> lock(header_mutex_);
+    std::lock_guard<RankedMutex> lock(header_mutex_);
     const uint64_t current = page_count_.load(std::memory_order_relaxed);
     const uint64_t maximum = static_cast<uint64_t>(std::numeric_limits<page_id_t>::max()) + 1U;
     if (page_count > maximum - current) {

@@ -81,6 +81,7 @@ find_package(Threads REQUIRED)
 add_library(reldb_core STATIC
   src/crc32c.cpp
   src/disk_manager.cpp
+  src/concurrency.cpp
   src/slotted_page.cpp
   src/clock_replacer.cpp
   src/page_allocator.cpp
@@ -171,6 +172,8 @@ if(RELDB_BUILD_BENCHMARKS)
   target_link_libraries(reldb_wal_benchmarks PRIVATE reldb_core benchmark::benchmark)
   add_executable(reldb_sql_execution_benchmarks bench/sql_execution_bench.cpp)
   target_link_libraries(reldb_sql_execution_benchmarks PRIVATE reldb_core)
+  add_executable(reldb_concurrency_benchmarks bench/concurrency_bench.cpp)
+  target_link_libraries(reldb_concurrency_benchmarks PRIVATE reldb_core Threads::Threads)
 endif()
 
 set(project_targets reldb_core relational_db)
@@ -181,6 +184,7 @@ endif()
 if(RELDB_BUILD_BENCHMARKS)
   list(APPEND project_targets reldb_benchmarks reldb_disk_benchmarks reldb_buffer_pool_benchmarks
        reldb_storage_benchmarks reldb_wal_benchmarks reldb_sql_execution_benchmarks)
+  list(APPEND project_targets reldb_concurrency_benchmarks)
 endif()
 foreach(target IN LISTS project_targets)
   reldb_configure_project_target(${target})

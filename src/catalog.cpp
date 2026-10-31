@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <string_view>
+#include <vector>
 
 #include "storage/storage_format.h"
 
@@ -271,7 +272,10 @@ void Catalog::Load(page_id_t catalog_page_id) {
                       catalog_page_id);
     }
     const auto* body = guard.As<BytePage>();
-    Reader reader(reinterpret_cast<const uint8_t*>(body->data()), body->size());
+    std::vector<uint8_t> catalog_bytes(body->size());
+    std::memcpy(catalog_bytes.data(), body->data(), body->size());
+    guard.Drop();
+    Reader reader(catalog_bytes.data(), catalog_bytes.size());
     if (reader.U32() != kCatalogVersion) {
         throw DbError(ErrorCode::UNSUPPORTED_VERSION, "Unsupported catalog version",
                       catalog_page_id);
@@ -322,7 +326,8 @@ void Catalog::Load(page_id_t catalog_page_id) {
         }
         tables_.push_back(std::move(table));
     }
-    if (reader.Offset() > body->size() || table_count > body->size() / kCatalogHeaderSize) {
+    if (reader.Offset() > catalog_bytes.size() ||
+        table_count > catalog_bytes.size() / kCatalogHeaderSize) {
         throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog table count is invalid", catalog_page_id);
     }
 }

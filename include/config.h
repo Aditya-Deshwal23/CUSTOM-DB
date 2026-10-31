@@ -20,7 +20,10 @@ constexpr static const page_id_t INVALID_PAGE_ID = -1;
 constexpr uint64_t MAX_RESULT_ROWS = 100000;
 constexpr uint64_t MAX_SORT_ROWS = 100000;
 constexpr uint64_t STATEMENT_TIMEOUT_MS = 5000;
+constexpr uint64_t STATEMENT_GATE_TIMEOUT_MS = 1000;
+constexpr uint64_t MAX_CONCURRENT_STATEMENTS = 64;
+constexpr uint64_t MAX_QUEUED_STATEMENTS = 128;
 
-} // namespace relational_db
+}  // namespace relational_db
 
-#endif // CONFIG_H
+#endif  // CONFIG_H

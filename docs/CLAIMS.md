@@ -37,7 +37,7 @@
 | Range scans terminate and return all sorted results after splits | verified | `BPlusTreeTest.RangeScanTerminatesAfterSplit`; the Linux test retains its memory/time-limited child |
 | API data is recovered using the WAL on normal startup | verified | `src/main.cpp`; `PersistenceTest.ExecutorIndexAndRowsSurviveCleanRestart` |
 | The WAL can append after a torn tail and recover committed statements | verified | `WalTest.RecordAppendedAfterTornTailIsRecoverable` |
-| WAL commits are synced before page write-back in `full` and `normal` modes | verified | `WalTest.NormalModeSyncsBeforeDatabaseWriteBack`; buffer-pool eviction and flush paths call `WriteAheadLog::EnsureDurable` |
+| Every committed write statement is durable before it returns, independent of background-sync mode | verified | `WalTest.EveryCommittedStatementIsDurableBeforeReturning`; WAL commit syncs the COMMIT record before `TxnContext::Commit()` returns |
 | WAL records and page images are explicit little-endian and CRC32C checked | verified | `docs/FILE_FORMAT.md`; `src/wal.cpp`; `src/crc32c.cpp`; `WalTest.RecordAppendedAfterTornTailIsRecoverable` |
 | Statement rollback restores before-images, page allocation state, and no-steal pages | verified | `WalTest.RollbackRestoresPageImagesAndAllocationState` |
 | `Executor::IntegrityCheck()` checks page checksums, B+ tree structure, and heap/index agreement | verified | `src/executor.cpp`; `BPlusTree::Validate()`; clean-restart integrity assertions in `PersistenceTest.ExecutorIndexAndRowsSurviveCleanRestart` |
@@ -54,7 +54,13 @@
 | Direct unsynchronized TableHeap access is safe for concurrent readers/writers | removed | `docs/CONCURRENCY.md`; the SQL executor gate, not TableHeap itself, serializes writes against readers |
 | SQL lexer token text is source-backed and zero-copy | verified | `SqlLexerTest.*` and `SqlParserTest.*` in `tests/sql_parser_test.cpp` |
 | The B+ tree uses latch crabbing | removed | `docs/CONCURRENCY.md`; writers are serialized by the caller's statement gate |
-| Executor serializes writers and permits concurrent readers without data races | verified | `ConcurrencyTest.ExecutorStatementGateTsanClean`; `ConcurrencyTest.SqlExecutorStatementGateTsanStress`; `.github/workflows/ci.yml` TSan job |
+| The ranked lock order is checked in Debug and aborts on inversion | verified | `ConcurrencyTest.LockRankCheckerAbortsOnInversion`; ranked mutexes cover statement gate, catalog, buffer pool, frame, and disk/WAL locks |
+| Debug checks reject disk/WAL I/O while the buffer-pool page-table mutex is held | verified | `ConcurrencyTest.LockRankCheckerRejectsIoUnderBufferPoolMutex`; disk and WAL I/O entry points assert the page-table rank is absent |
+| Eight readers in a tight loop cannot starve a waiting statement writer | verified | `ConcurrencyTest.WriterPreferringGateBoundsWriterWait` |
+| Statement gate timeouts and a full bounded queue return typed `BUSY` errors | verified | `ConcurrencyTest.GateTimeoutAndQueueOverflowReturnBusy` |
+| Eight SQL workers safely interleave reads and writes across three tables while preserving the zero-balance invariant | verified | `ConcurrencyTest.SqlExecutorStatementGateTsanStress`; `.github/workflows/ci.yml` runs 10-second TSan stress and `.github/workflows/nightly.yml` runs 60 seconds |
+| Executor serializes writers and permits concurrent readers without data races | verified | `ConcurrencyTest.ExecutorStatementGateTsanClean`; `ConcurrencyTest.ReaderWriterTsanClean`; CI TSan job |
+| Point-SELECT scaling and 95/5 read/write p50/p99 latency are measured | verified | `reldb_concurrency_benchmarks`; `docs/benchmarks.md` records the measured host and run |
 | Metrics describe a real engine-wide workload | removed | `/api/metrics` explicitly reports zero values with source `uninstrumented` until instrumentation is implemented |
 | The dashboard reports real active latch counts and disk-I/O latency | removed | `active_latches` and derived I/O latency are not exposed; dashboard simulation uses a persistent warning |
 | Dashboard schema and execution trace represent a live catalog/backend trace | removed | `README.md`; the simulation trace is explicitly illustrative |

@@ -1,6 +1,7 @@
 #ifndef RELDB_STORAGE_TABLE_HEAP_H
 #define RELDB_STORAGE_TABLE_HEAP_H
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -46,7 +47,8 @@ class TableIterator {
     page_id_t next_page_id_{INVALID_PAGE_ID};
     page_id_t current_page_id_{INVALID_PAGE_ID};
     uint16_t next_slot_{0};
-    ReadPageGuard page_guard_;
+    std::array<char, PAGE_DATA_SIZE> page_data_{};
+    bool page_loaded_{false};
 };
 
 class TableHeap {

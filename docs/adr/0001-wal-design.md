@@ -17,9 +17,10 @@ The commit sequence is:
 1. Assign each page image an LSN and encode its page checksum.
 2. Append every PAGE_IMAGE and one COMMIT record into a single buffered batch.
 3. Write that batch to the WAL.
-4. Enforce the selected WAL sync mode.
-5. Only then permit a committed page to be written back; acknowledge the
-   statement after the selected durability point.
+4. Sync the WAL batch before commit returns, independent of the selected
+   background-sync mode.
+5. Only then permit a committed page to be written back and acknowledge the
+   statement.
 
 Recovery validates the WAL header and record CRC32C values, replays page images
 belonging to committed transactions in LSN order, syncs the database, and
@@ -36,9 +37,9 @@ and blocks new transactions for the entire checkpoint.
 
 | `DURABILITY` | Acknowledgement boundary | Trade-off |
 |---|---|---|
-| `full` (default) | WAL `fdatasync` (or the platform's equivalent) on every commit | Strongest acknowledgment guarantee; highest sync cost |
-| `normal` | WAL sync on an interval, with a timer that syncs pending commits no later than `WAL_SYNC_INTERVAL_MS` (default 1000 ms), and before any corresponding database page write-back | A crash can lose recently acknowledged statements within the configured interval; page write-back never gets ahead of a durable COMMIT |
-| `off` | WAL writes are not synced for each commit | Benchmarks only; startup refuses unless `ALLOW_UNSAFE=1`; neither acknowledgment nor page write-back is crash-safe |
+| `full` (default) | WAL `fdatasync` (or the platform's equivalent) on every commit | Durable statement acknowledgements |
+| `normal` | WAL sync on every commit and periodic background syncs | Same commit durability as `full`; background sync interval remains configurable |
+| `off` | WAL sync on every commit; no periodic sync thread | Same commit durability as `full`; legacy mode name retained for benchmark compatibility |
 
 `WAL_MAX_BYTES` controls the automatic checkpoint threshold (default 16 MiB).
 An explicit checkpoint and clean server shutdown use the same checkpoint
@@ -57,8 +58,8 @@ they are not an on-disk undo log.
 
 - WAL space is bounded by checkpointing and recovery truncation.
 - Full-page images make replay independent of B+ tree operation semantics.
-- No-steal plus write-ahead sync prevents an uncommitted or non-durable page
-  from reaching the database file.
+- No-steal plus per-commit WAL sync prevents an uncommitted or non-durable
+  page from reaching the database file.
 - Large statements can exhaust the buffer pool and fail with
   `DbError{TXN_TOO_LARGE}`; their in-memory before-images restore the statement.
 - A crash during replay can repeat writes, so page-image application and

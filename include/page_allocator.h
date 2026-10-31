@@ -1,6 +1,8 @@
 #ifndef PAGE_ALLOCATOR_H
 #define PAGE_ALLOCATOR_H
 
+#include <mutex>
+
 #include "page_guard.h"
 
 namespace relational_db {
@@ -17,6 +19,7 @@ class PageAllocator {
 
    private:
     BufferPoolManager& buffer_pool_;
+    std::mutex allocator_mutex_;
 };
 
 }  // namespace relational_db

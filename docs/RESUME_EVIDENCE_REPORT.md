@@ -101,7 +101,7 @@ All numbers below are end-to-end local HTTP client timing from the environment a
 
 ## Code Quality Findings
 
-- `DiskManager` serializes file access with `std::mutex`; buffer-pool and B+ tree root access use `std::shared_mutex`.
+- Disk metadata and WAL access use ranked mutexes, and the executor uses the writer-preferring statement gate plus ranked catalog gate; the B+ tree relies on that statement gate rather than a root latch.
 - The API now rejects malformed query bodies without throwing. Database-open errors now return a clear nonzero startup failure instead of aborting.
 - `WriteAheadLog`, `SlottedPage`, `ScanWithPredicate`, and several WAL-related types exist in source, but `main.cpp` does not create a WAL or call recovery, and the public API does not use slotted pages or predicate scans.
 - The dashboard execution trace and schema are visual/simulated; they do not represent a table catalog or all engine operations. Simulation mode now shows a persistent warning, and live mode only displays API-reported metrics and query results.

@@ -106,7 +106,7 @@ void RunScale(uint64_t row_count) {
             "AVG(payload) FROM benchmark_rows");
     });
 
-    std::cout << "rows=" << row_count << " durability=off"
+    std::cout << "rows=" << row_count << " background_sync=off"
               << " point_select_ns=" << point_ns << " range_100_ns=" << range_ns
               << " insert_ns=" << insert_ns << " update_ns=" << update_ns
               << " full_scan_aggregate_ns=" << aggregate_ns << '\n';
@@ -125,8 +125,8 @@ int main(int argc, char** argv) {
             scales.push_back(std::stoull(argv[argument]));
         }
     }
-    std::cout << "SQL execution benchmark uses WAL durability=off; results are not "
-                 "durability measurements.\n";
+    std::cout << "SQL execution benchmark disables only periodic WAL sync; every statement "
+                 "commit remains durable.\n";
     for (uint64_t scale : scales) {
         if (scale < 100U) {
             std::cerr << "row counts must be at least 100\n";

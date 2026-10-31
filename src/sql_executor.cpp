@@ -33,20 +33,6 @@ void OperatorStatsSink::Add(OperatorMetrics metrics) {
     found->pages_missed += metrics.pages_missed;
 }
 
-CancellationToken::CancellationToken(std::chrono::steady_clock::time_point deadline)
-    : deadline_(deadline) {}
-
-void CancellationToken::Cancel() noexcept {
-    cancelled_.store(true, std::memory_order_release);
-}
-
-void CancellationToken::Check() const {
-    if (cancelled_.load(std::memory_order_acquire) ||
-        std::chrono::steady_clock::now() >= deadline_) {
-        throw DbError(ErrorCode::QUERY_TIMEOUT, "Statement execution timed out");
-    }
-}
-
 VolcanoOperator::VolcanoOperator(ExecutionContext& context) : context_(context) {}
 
 void VolcanoOperator::Init() {
@@ -2301,7 +2287,7 @@ std::string AnalyzeSelect(QueryPlan& plan, OperatorStatsSink& stats) {
 class SqlExecutionEngine::Impl {
    public:
     Impl(std::shared_ptr<BufferPoolManager> buffer_pool, WriteAheadLog* wal,
-         std::shared_mutex& statement_gate, page_id_t owner_meta_page_id)
+         WriterPreferringSharedMutex& statement_gate, page_id_t owner_meta_page_id)
         : buffer_pool_(std::move(buffer_pool)),
           wal_(wal),
           statement_gate_(statement_gate),
@@ -2317,35 +2303,19 @@ class SqlExecutionEngine::Impl {
         if (statement.kind == SqlStatementKind::EXPLAIN) {
             return ExecuteExplain(statement);
         }
-        if (statement.kind == SqlStatementKind::SELECT) {
-            std::shared_lock<std::shared_mutex> lock(statement_gate_);
-            return ExecuteSelect(statement, nullptr, nullptr);
+        if (statement.kind == SqlStatementKind::SELECT ||
+            statement.kind == SqlStatementKind::SHOW_TABLES ||
+            statement.kind == SqlStatementKind::DESCRIBE) {
+            StatementScope scope(statement_gate_, false);
+            std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+            if (statement.kind == SqlStatementKind::SELECT) {
+                return ExecuteSelect(statement, &scope.Cancellation(), nullptr);
+            }
+            return ExecuteReadMetadata(statement);
         }
-        std::unique_lock<std::shared_mutex> lock(statement_gate_);
+        StatementScope scope(statement_gate_, true);
+        std::unique_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
         catalog_.Reload();
-        if (statement.kind == SqlStatementKind::SHOW_TABLES) {
-            std::ostringstream result;
-            result << "Tables";
-            for (const auto& table : catalog_.Tables()) {
-                result << '\n' << table->name;
-            }
-            buffer_pool_->AssertNoPinsHeld();
-            return result.str();
-        }
-        if (statement.kind == SqlStatementKind::DESCRIBE) {
-            const CatalogTable& table = RequireTable(catalog_, statement.table);
-            std::ostringstream result;
-            result << "column\ttype\tnot_null\tprimary_key";
-            for (size_t index = 0; index < table.schema.columns.size(); ++index) {
-                const Column& column = table.schema.columns[index];
-                result << '\n'
-                       << column.name << '\t' << ColumnTypeName(column) << '\t'
-                       << (table.not_null[index] ? "YES" : "NO") << '\t'
-                       << (table.schema.primary_key == index ? "YES" : "NO");
-            }
-            buffer_pool_->AssertNoPinsHeld();
-            return result.str();
-        }
         if (statement.kind == SqlStatementKind::CHECKPOINT) {
             if (wal_ != nullptr) {
                 wal_->Checkpoint(*buffer_pool_);
@@ -2363,9 +2333,8 @@ class SqlExecutionEngine::Impl {
             transaction = buffer_pool_->BeginTransaction(*wal_);
         }
         try {
-            CancellationToken cancellation;
             ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                     &cancellation, nullptr};
+                                     &scope.Cancellation(), nullptr};
             const std::string result = ExecuteWrite(statement, context);
             if (transaction) {
                 transaction->Commit();
@@ -2390,6 +2359,30 @@ class SqlExecutionEngine::Impl {
     }
 
    private:
+    std::string ExecuteReadMetadata(const SqlStatement& statement) {
+        if (statement.kind == SqlStatementKind::SHOW_TABLES) {
+            std::ostringstream result;
+            result << "Tables";
+            for (const auto& table : catalog_.Tables()) {
+                result << '\n' << table->name;
+            }
+            buffer_pool_->AssertNoPinsHeld();
+            return result.str();
+        }
+        const CatalogTable& table = RequireTable(catalog_, statement.table);
+        std::ostringstream result;
+        result << "column\ttype\tnot_null\tprimary_key";
+        for (size_t index = 0; index < table.schema.columns.size(); ++index) {
+            const Column& column = table.schema.columns[index];
+            result << '\n'
+                   << column.name << '\t' << ColumnTypeName(column) << '\t'
+                   << (table.not_null[index] ? "YES" : "NO") << '\t'
+                   << (table.schema.primary_key == index ? "YES" : "NO");
+        }
+        buffer_pool_->AssertNoPinsHeld();
+        return result.str();
+    }
+
     static std::string ColumnTypeName(const Column& column) {
         switch (column.type) {
             case ColumnType::INT:
@@ -2409,9 +2402,7 @@ class SqlExecutionEngine::Impl {
     std::string ExecuteSelect(const SqlStatement& statement, CancellationToken* cancellation,
                               OperatorStatsSink* stats) {
         CatalogTable& table = RequireTable(catalog_, statement.table);
-        CancellationToken local_cancel;
-        ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr,
-                                 cancellation == nullptr ? &local_cancel : cancellation, stats};
+        ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, cancellation, stats};
         QueryPlan plan = BuildSelectPlan(context, table, statement);
         const std::string result = RenderRows(*plan.root, plan.output_schema, plan.output_names);
         buffer_pool_->AssertNoPinsHeld();
@@ -2483,18 +2474,19 @@ class SqlExecutionEngine::Impl {
         }
         const SqlStatement& explained = *statement.explained_statement;
         const bool write = explained.kind != SqlStatementKind::SELECT;
-        std::unique_lock<std::shared_mutex> write_lock(statement_gate_, std::defer_lock);
-        std::shared_lock<std::shared_mutex> read_lock(statement_gate_, std::defer_lock);
+        StatementScope scope(statement_gate_, write);
+        std::unique_lock<RankedSharedMutex> catalog_write_lock(catalog_gate_, std::defer_lock);
+        std::shared_lock<RankedSharedMutex> catalog_read_lock(catalog_gate_, std::defer_lock);
         if (write) {
-            write_lock.lock();
+            catalog_write_lock.lock();
         } else {
-            read_lock.lock();
+            catalog_read_lock.lock();
         }
         if (write) {
             catalog_.Reload();
         }
-        CancellationToken cancellation;
-        ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &cancellation, nullptr};
+        ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &scope.Cancellation(),
+                                 nullptr};
         if (!statement.flag) {
             const std::string plan = StatementPlan(explained, catalog_, context);
             buffer_pool_->AssertNoPinsHeld();
@@ -2509,9 +2501,6 @@ class SqlExecutionEngine::Impl {
             buffer_pool_->AssertNoPinsHeld();
             return result;
         }
-        write_lock.unlock();
-        std::unique_lock<std::shared_mutex> lock(statement_gate_);
-        catalog_.Reload();
         if (wal_ == nullptr) {
             throw DbError(ErrorCode::INVALID_ARGUMENT,
                           "EXPLAIN ANALYZE of writes requires a WAL-backed Executor");
@@ -2523,7 +2512,7 @@ class SqlExecutionEngine::Impl {
         try {
             OperatorStatsSink stats;
             ExecutionContext write_context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                           &cancellation, &stats};
+                                           &scope.Cancellation(), &stats};
             const std::string affected = ExecuteWrite(explained, write_context);
             if (transaction) {
                 transaction->Commit();
@@ -2557,12 +2546,14 @@ class SqlExecutionEngine::Impl {
 
     std::shared_ptr<BufferPoolManager> buffer_pool_;
     WriteAheadLog* wal_;
-    std::shared_mutex& statement_gate_;
+    WriterPreferringSharedMutex& statement_gate_;
+    RankedSharedMutex catalog_gate_{LockRank::CATALOG};
     Catalog catalog_;
 };
 
 SqlExecutionEngine::SqlExecutionEngine(std::shared_ptr<BufferPoolManager> buffer_pool,
-                                       WriteAheadLog* wal, std::shared_mutex& statement_gate,
+                                       WriteAheadLog* wal,
+                                       WriterPreferringSharedMutex& statement_gate,
                                        page_id_t owner_meta_page_id)
     : impl_(std::make_unique<Impl>(std::move(buffer_pool), wal, statement_gate,
                                    owner_meta_page_id)) {}

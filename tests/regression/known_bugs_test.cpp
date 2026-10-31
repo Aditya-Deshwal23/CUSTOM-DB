@@ -5,12 +5,14 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <random>
 #include <set>
 #include <string>
@@ -160,16 +162,46 @@ TEST(WalTest, StatementThatExceedsBufferPoolRollsBack) {
     wal.Recover(*disk);
     auto bpm = std::make_shared<BufferPoolManager>(16, disk);
     auto transaction = bpm->BeginTransaction(wal);
-    std::vector<relational_db::WritePageGuard> guards;
+    constexpr size_t kAllocationWorkers = 17;
+    std::mutex release_mutex;
+    std::condition_variable release_condition;
+    bool release_guards = false;
+    std::atomic<size_t> successful_allocations{0};
+    std::atomic<bool> allocation_failed{false};
+    std::atomic<int> failure_code{static_cast<int>(relational_db::ErrorCode::INVALID_ARGUMENT)};
+    std::vector<std::thread> allocation_workers;
+    allocation_workers.reserve(kAllocationWorkers);
 
-    try {
-        while (true) {
-            guards.push_back(bpm->NewPageGuarded());
-        }
-    } catch (const DbError& error) {
-        EXPECT_EQ(error.Code(), relational_db::ErrorCode::TXN_TOO_LARGE);
+    for (size_t worker = 0; worker < kAllocationWorkers; ++worker) {
+        allocation_workers.emplace_back([&]() {
+            try {
+                relational_db::WritePageGuard guard = bpm->NewPageGuarded();
+                successful_allocations.fetch_add(1, std::memory_order_release);
+                std::unique_lock<std::mutex> lock(release_mutex);
+                release_condition.wait(lock, [&]() { return release_guards; });
+            } catch (const DbError& error) {
+                failure_code.store(static_cast<int>(error.Code()), std::memory_order_release);
+                allocation_failed.store(true, std::memory_order_release);
+            }
+        });
     }
-    guards.clear();
+
+    while (!allocation_failed.load(std::memory_order_acquire) &&
+           successful_allocations.load(std::memory_order_acquire) < kAllocationWorkers) {
+        std::this_thread::yield();
+    }
+    {
+        std::lock_guard<std::mutex> lock(release_mutex);
+        release_guards = true;
+    }
+    release_condition.notify_all();
+    for (std::thread& worker : allocation_workers) {
+        worker.join();
+    }
+
+    EXPECT_TRUE(allocation_failed.load(std::memory_order_acquire));
+    EXPECT_EQ(failure_code.load(std::memory_order_acquire),
+              static_cast<int>(relational_db::ErrorCode::TXN_TOO_LARGE));
     transaction->Rollback();
     EXPECT_EQ(disk->SizeInPages(), 1U);
     EXPECT_NO_THROW(bpm->AssertNoPinsHeld());
@@ -242,27 +274,65 @@ TEST(WalTest, CheckpointExcludesNewWriteTransactionsUntilTruncate) {
 #endif
 }
 
-TEST(WalTest, NormalModeSyncsBeforeDatabaseWriteBack) {
+TEST(WalTest, AutomaticCheckpointFailureDoesNotFailCommittedStatement) {
+#if defined(_WIN32)
+    GTEST_SKIP() << "Failpoint environment mutation test is not enabled on Windows.";
+#else
     TemporaryPath path;
+    relational_db::page_id_t committed_page_id = relational_db::INVALID_PAGE_ID;
+    {
+        auto disk = std::make_shared<DiskManager>(path.String());
+        WriteAheadLog wal(path.String(), relational_db::DurabilityMode::FULL, 1000, 1);
+        wal.Recover(*disk);
+        auto bpm = std::make_shared<BufferPoolManager>(16, disk);
+        auto transaction = bpm->BeginTransaction(wal);
+        {
+            auto page = bpm->NewPageGuarded();
+            committed_page_id = page.GetPageId();
+            page.AsMut<std::array<char, relational_db::PAGE_DATA_SIZE>>()->fill('x');
+        }
+
+        ASSERT_EQ(setenv("RELDB_FAILPOINT", "checkpoint_before_truncate:throw", 1), 0);
+        EXPECT_NO_THROW(transaction->Commit());
+        EXPECT_THROW(wal.Checkpoint(*bpm), DbError);
+        unsetenv("RELDB_FAILPOINT");
+    }
+
     auto disk = std::make_shared<DiskManager>(path.String());
-    WriteAheadLog wal(path.String(), relational_db::DurabilityMode::NORMAL, 60000,
-                      16U * 1024U * 1024U);
+    WriteAheadLog wal(path.String());
     wal.Recover(*disk);
-    auto bpm = std::make_shared<BufferPoolManager>(32, disk);
-    Executor executor(bpm, wal);
-    EXPECT_EQ(executor.ExecuteQuery("INSERT 8 80"), "Inserted (8, 80)");
+    auto bpm = std::make_shared<BufferPoolManager>(16, disk);
+    auto page = bpm->FetchRead(committed_page_id);
+    const auto* body = page.As<std::array<char, relational_db::PAGE_DATA_SIZE>>();
+    EXPECT_EQ(body->front(), 'x');
+#endif
+}
 
-    const uint64_t pending_lsn = wal.GetNextLSN();
-    EXPECT_LT(wal.GetFirstUnsyncedLSN(), pending_lsn);
-    bpm->FlushAll();
-    EXPECT_GE(wal.GetFirstUnsyncedLSN(), pending_lsn);
+TEST(WalTest, EveryCommittedStatementIsDurableBeforeReturning) {
+    const std::array<relational_db::DurabilityMode, 3> modes{relational_db::DurabilityMode::FULL,
+                                                             relational_db::DurabilityMode::NORMAL,
+                                                             relational_db::DurabilityMode::OFF};
+    for (const relational_db::DurabilityMode mode : modes) {
+        TemporaryPath path;
+        auto disk = std::make_shared<DiskManager>(path.String());
+        WriteAheadLog wal(path.String(), mode, 60000, 16U * 1024U * 1024U);
+        wal.Recover(*disk);
+        auto bpm = std::make_shared<BufferPoolManager>(32, disk);
+        Executor executor(bpm, wal);
+        EXPECT_EQ(executor.ExecuteQuery("INSERT 8 80"), "Inserted (8, 80)");
 
-    auto recovered_disk = std::make_shared<DiskManager>(path.String(), true);
-    WriteAheadLog recovered_wal(path.String());
-    recovered_wal.Recover(*recovered_disk);
-    auto recovered_bpm = std::make_shared<BufferPoolManager>(32, recovered_disk);
-    Executor recovered_executor(recovered_bpm, recovered_wal);
-    EXPECT_EQ(recovered_executor.ExecuteQuery("SELECT 8"), "Result: 80");
+        const uint64_t committed_lsn = wal.GetNextLSN();
+        EXPECT_GE(wal.GetFirstUnsyncedLSN(), committed_lsn);
+        bpm->FlushAll();
+        EXPECT_GE(wal.GetFirstUnsyncedLSN(), committed_lsn);
+
+        auto recovered_disk = std::make_shared<DiskManager>(path.String(), true);
+        WriteAheadLog recovered_wal(path.String());
+        recovered_wal.Recover(*recovered_disk);
+        auto recovered_bpm = std::make_shared<BufferPoolManager>(32, recovered_disk);
+        Executor recovered_executor(recovered_bpm, recovered_wal);
+        EXPECT_EQ(recovered_executor.ExecuteQuery("SELECT 8"), "Result: 80");
+    }
 }
 
 TEST(WalTest, NormalModeSyncThreadTsanClean) {
@@ -721,8 +791,11 @@ TEST(WalTest, RecordAppendedAfterTornTailIsRecoverable) {
 
 TEST(ConcurrencyTest, ExecutorStatementGateTsanClean) {
     TemporaryPath path;
-    auto bpm = MakeBufferPool(path.String());
-    Executor executor(bpm);
+    auto disk = std::make_shared<DiskManager>(path.String());
+    WriteAheadLog wal(path.String());
+    wal.Recover(*disk);
+    auto bpm = std::make_shared<BufferPoolManager>(64, disk);
+    Executor executor(bpm, wal);
     for (int key = 1; key <= 2000; ++key) {
         ASSERT_EQ(executor.ExecuteQuery("INSERT " + std::to_string(key) + " " +
                                         std::to_string(key * 100)),

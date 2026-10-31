@@ -114,6 +114,7 @@ void AppendU64(std::vector<uint8_t>& bytes, uint64_t value) {
 }
 
 void WriteFullyAt(int descriptor, uint64_t offset, const uint8_t* buffer, size_t length) {
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
     size_t transferred = 0;
     while (transferred < length) {
 #ifdef _WIN32
@@ -138,6 +139,7 @@ void WriteFullyAt(int descriptor, uint64_t offset, const uint8_t* buffer, size_t
 }
 
 bool ReadFullyAt(int descriptor, uint64_t offset, uint8_t* buffer, size_t length) {
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
     size_t transferred = 0;
     while (transferred < length) {
 #ifdef _WIN32
@@ -179,6 +181,7 @@ uint64_t GetFileSize(int descriptor) {
 }
 
 void SyncDescriptor(int descriptor) {
+    LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
 #ifdef _WIN32
     if (_commit(descriptor) != 0) {
         throw DbError(ErrorCode::IO_ERROR, IoMessage("commit WAL"));
@@ -261,10 +264,6 @@ DurabilityMode ReadModeFromEnvironment() {
         return DurabilityMode::NORMAL;
     }
     if (mode == "off") {
-        const char* unsafe = std::getenv("ALLOW_UNSAFE");
-        if (unsafe == nullptr || std::string(unsafe) != "1") {
-            throw DbError(ErrorCode::INVALID_ARGUMENT, "DURABILITY=off requires ALLOW_UNSAFE=1");
-        }
         return DurabilityMode::OFF;
     }
     throw DbError(ErrorCode::INVALID_ARGUMENT, "DURABILITY must be full, normal, or off");
@@ -310,7 +309,12 @@ void TxnContext::Commit() {
         throw;
     }
     if (wal_->ShouldCheckpoint()) {
-        wal_->Checkpoint(*buffer_pool_);
+        try {
+            wal_->Checkpoint(*buffer_pool_);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "Automatic checkpoint failed after durable commit: %s\n",
+                         error.what());
+        }
     }
 }
 
@@ -379,12 +383,6 @@ WriteAheadLog::WriteAheadLog(const std::string& database_path, DurabilityMode mo
         throw DbError(ErrorCode::INVALID_ARGUMENT,
                       "WAL sync interval and maximum size must be positive");
     }
-    if (mode_ == DurabilityMode::OFF) {
-        const char* unsafe = std::getenv("ALLOW_UNSAFE");
-        if (unsafe == nullptr || std::string(unsafe) != "1") {
-            throw DbError(ErrorCode::INVALID_ARGUMENT, "DURABILITY=off requires ALLOW_UNSAFE=1");
-        }
-    }
 #ifdef _WIN32
     file_descriptor_ =
         _open(filename_.c_str(), _O_RDWR | _O_CREAT | _O_BINARY, _S_IREAD | _S_IWRITE);
@@ -415,7 +413,7 @@ WriteAheadLog::WriteAheadLog(const std::string& database_path, DurabilityMode mo
 
 WriteAheadLog::~WriteAheadLog() {
     {
-        std::lock_guard<std::mutex> lock(latch_);
+        std::lock_guard<RankedMutex> lock(latch_);
         stop_sync_thread_ = true;
     }
     sync_condition_.notify_all();
@@ -445,7 +443,7 @@ void WriteAheadLog::ThrowSyncError() const {
 }
 
 void WriteAheadLog::RunSyncTimer() {
-    std::unique_lock<std::mutex> lock(latch_);
+    std::unique_lock<RankedMutex> lock(latch_);
     while (!stop_sync_thread_) {
         if (sync_condition_.wait_for(lock, std::chrono::milliseconds(sync_interval_ms_),
                                      [this]() { return stop_sync_thread_; })) {
@@ -465,17 +463,17 @@ void WriteAheadLog::RunSyncTimer() {
 }
 
 uint64_t WriteAheadLog::SizeBytes() const {
-    std::lock_guard<std::mutex> lock(latch_);
+    std::lock_guard<RankedMutex> lock(latch_);
     return file_size_;
 }
 
 uint64_t WriteAheadLog::GetFirstUnsyncedLSN() const {
-    std::lock_guard<std::mutex> lock(latch_);
+    std::lock_guard<RankedMutex> lock(latch_);
     return durable_lsn_;
 }
 
 bool WriteAheadLog::ShouldCheckpoint() const {
-    std::lock_guard<std::mutex> lock(latch_);
+    std::lock_guard<RankedMutex> lock(latch_);
     return file_size_ > max_bytes_;
 }
 
@@ -483,7 +481,7 @@ void WriteAheadLog::EnsureDurable(uint64_t page_lsn) {
     if (mode_ == DurabilityMode::OFF) {
         return;
     }
-    std::lock_guard<std::mutex> lock(latch_);
+    std::lock_guard<RankedMutex> lock(latch_);
     EnsureRecovered();
     ThrowSyncError();
     if (page_lsn >= durable_lsn_) {
@@ -498,7 +496,7 @@ void WriteAheadLog::EnsureDurable(uint64_t page_lsn) {
 }
 
 std::vector<uint64_t> WriteAheadLog::Commit(uint64_t txn_id, const std::vector<CommitPage>& pages) {
-    std::lock_guard<std::mutex> lock(latch_);
+    std::lock_guard<RankedMutex> lock(latch_);
     EnsureRecovered();
     ThrowSyncError();
 
@@ -545,22 +543,14 @@ std::vector<uint64_t> WriteAheadLog::Commit(uint64_t txn_id, const std::vector<C
     next_txn_id_ = std::max(next_txn_id_, txn_id + 1U);
     FailPoint::Hit("commit_after");
 
-    const auto now = std::chrono::steady_clock::now();
-    const bool sync_now =
-        mode_ == DurabilityMode::FULL ||
-        (mode_ == DurabilityMode::NORMAL &&
-         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sync_).count() >=
-             static_cast<int64_t>(sync_interval_ms_));
-    if (sync_now) {
-        try {
-            Sync();
-        } catch (const std::exception& error) {
-            sync_error_ = error.what();
-            throw;
-        }
-        durable_lsn_ = next_lsn_;
-        FailPoint::Hit("wal_fsync_after");
+    try {
+        Sync();
+    } catch (const std::exception& error) {
+        sync_error_ = error.what();
+        throw;
     }
+    durable_lsn_ = next_lsn_;
+    FailPoint::Hit("wal_fsync_after");
     return page_lsns;
 }
 
@@ -570,7 +560,7 @@ void WriteAheadLog::Sync() {
 }
 
 WalRecoveryStats WriteAheadLog::Recover(IDiskManager& disk_manager) {
-    std::lock_guard<std::mutex> lock(latch_);
+    std::lock_guard<RankedMutex> lock(latch_);
     const auto started = std::chrono::steady_clock::now();
     ThrowSyncError();
     WalRecoveryStats stats{};
@@ -693,7 +683,7 @@ void WriteAheadLog::Checkpoint(BufferPoolManager& buffer_pool) {
     try {
         buffer_pool.FlushAll();
         FailPoint::Hit("checkpoint_db_fsync_after");
-        std::lock_guard<std::mutex> lock(latch_);
+        std::lock_guard<RankedMutex> lock(latch_);
         ThrowSyncError();
         const uint64_t checkpoint_lsn = next_lsn_++;
         std::vector<uint8_t> record;

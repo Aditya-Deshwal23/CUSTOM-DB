@@ -50,8 +50,8 @@ python3 tools/difftest.py --binary build/relational_db --statements 10000
 ```
 
 The seed is printed and can be overridden with `--seed`. The harness uses
-`DURABILITY=off` only for this disposable test database; this mode is unsafe
-for real data and requires `ALLOW_UNSAFE=1`.
+`DURABILITY=off` only to disable the periodic WAL sync thread; every statement
+commit still syncs its WAL record before returning.
 
 The generated subset avoids or normalizes known engine/SQLite semantic
 differences:

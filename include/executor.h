@@ -3,12 +3,12 @@
 
 #include <functional>
 #include <memory>
-#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "b_plus_tree.h"
+#include "concurrency.h"
 #include "storage/table_heap.h"
 #include "storage/value.h"
 
@@ -42,7 +42,7 @@ class Executor {
     std::string ExecuteLegacyQuery(const std::string& query);
 
     std::shared_ptr<BufferPoolManager> bpm_;
-    mutable std::shared_mutex statement_gate_;
+    mutable WriterPreferringSharedMutex statement_gate_;
     WriteAheadLog* wal_{nullptr};
     std::unique_ptr<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>> tree_;
     std::unique_ptr<TableHeap> heap_;

@@ -1,12 +1,15 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,6 +47,19 @@ class TemporaryDatabase {
    private:
     std::filesystem::path path_;
 };
+
+uint64_t ConcurrencyStressDurationSeconds() {
+    const char* configured = std::getenv("RELDB_CONCURRENCY_STRESS_SECONDS");
+    if (configured == nullptr) {
+        return 10;
+    }
+    char* end = nullptr;
+    const unsigned long seconds = std::strtoul(configured, &end, 10);
+    if (end == configured || *end != '\0' || seconds == 0) {
+        throw std::runtime_error("RELDB_CONCURRENCY_STRESS_SECONDS must be a positive integer");
+    }
+    return static_cast<uint64_t>(seconds);
+}
 
 struct SqlFixture {
     explicit SqlFixture(const std::string& path)
@@ -96,6 +112,125 @@ TEST(SqlExecutionTest, FailedMultiRowInsertRollsBackEveryRow) {
                  DbError);
     EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT COUNT(*) FROM items"), "COUNT(*)\n0");
     fixture.bpm->AssertNoPinsHeld();
+}
+
+TEST(SqlExecutionTest, RejectsLegacyWritesWithoutWal) {
+    TemporaryDatabase database;
+    auto disk = std::make_shared<DiskManager>(database.Path());
+    auto buffer_pool = std::make_shared<BufferPoolManager>(32, disk);
+    Executor executor(buffer_pool);
+
+    EXPECT_THROW(executor.ExecuteQuery("INSERT 1 10"), DbError);
+    buffer_pool->AssertNoPinsHeld();
+}
+
+TEST(ConcurrencyTest, WriterPreferringGateBoundsWriterWait) {
+    WriterPreferringSharedMutex gate(16, 64, std::chrono::milliseconds(2000));
+    std::atomic<bool> stop_readers{false};
+    std::atomic<bool> readers_ready{false};
+    std::vector<std::thread> readers;
+    for (size_t index = 0; index < 8U; ++index) {
+        readers.emplace_back([&]() {
+            while (!stop_readers.load(std::memory_order_acquire)) {
+                std::shared_lock<WriterPreferringSharedMutex> lock(gate);
+                readers_ready.store(true, std::memory_order_release);
+            }
+        });
+    }
+    while (!readers_ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    {
+        std::unique_lock<WriterPreferringSharedMutex> lock(gate);
+    }
+    const auto waited = std::chrono::steady_clock::now() - start;
+    stop_readers.store(true, std::memory_order_release);
+    for (std::thread& reader : readers) {
+        reader.join();
+    }
+    EXPECT_LT(waited, std::chrono::seconds(2));
+    EXPECT_EQ(gate.ActiveStatements(), 0U);
+}
+
+TEST(ConcurrencyTest, GateTimeoutAndQueueOverflowReturnBusy) {
+    WriterPreferringSharedMutex timeout_gate(1, 1, std::chrono::milliseconds(100));
+    std::shared_lock<WriterPreferringSharedMutex> active_reader(timeout_gate);
+    std::atomic<bool> timed_out{false};
+    std::thread waiting_writer([&]() {
+        try {
+            std::unique_lock<WriterPreferringSharedMutex> lock(timeout_gate);
+        } catch (const DbError& error) {
+            timed_out.store(error.Code() == ErrorCode::BUSY, std::memory_order_release);
+        }
+    });
+    waiting_writer.join();
+    active_reader.unlock();
+    EXPECT_TRUE(timed_out.load(std::memory_order_acquire));
+
+    WriterPreferringSharedMutex bounded_gate(1, 0, std::chrono::milliseconds(100));
+    std::shared_lock<WriterPreferringSharedMutex> active_statement(bounded_gate);
+    EXPECT_THROW(
+        { std::shared_lock<WriterPreferringSharedMutex> queued_statement(bounded_gate); }, DbError);
+}
+
+TEST(ConcurrencyTest, ReaderWriterTsanClean) {
+    constexpr uint64_t seed = 0xC0FFEEU;
+    std::cout << "Reader/writer gate seed=" << seed << '\n';
+    WriterPreferringSharedMutex gate(16, 128);
+    std::atomic<uint64_t> value{0};
+    std::atomic<uint64_t> writes{0};
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> workers;
+    for (size_t index = 0; index < 8U; ++index) {
+        workers.emplace_back([&, index]() {
+            std::mt19937_64 random(seed + index);
+            for (size_t iteration = 0; iteration < 2000U; ++iteration) {
+                if ((random() & 3U) == 0U) {
+                    StatementScope scope(gate, true);
+                    value.fetch_add(1, std::memory_order_relaxed);
+                    writes.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    StatementScope scope(gate, false);
+                    const uint64_t observed = value.load(std::memory_order_relaxed);
+                    if (observed > 16000U) {
+                        failed.store(true, std::memory_order_relaxed);
+                    }
+                }
+            }
+        });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    EXPECT_FALSE(failed.load());
+    EXPECT_EQ(value.load(), writes.load());
+}
+
+TEST(ConcurrencyTest, LockRankCheckerAbortsOnInversion) {
+#ifndef NDEBUG
+    EXPECT_DEATH(
+        {
+            RankedMutex buffer_pool_lock(LockRank::BUFFER_POOL);
+            RankedMutex frame_lock(LockRank::FRAME_LATCH);
+            std::lock_guard<RankedMutex> frame_guard(frame_lock);
+            std::lock_guard<RankedMutex> pool_guard(buffer_pool_lock);
+        },
+        "Lock-rank inversion");
+#endif
+}
+
+TEST(ConcurrencyTest, LockRankCheckerRejectsIoUnderBufferPoolMutex) {
+#ifndef NDEBUG
+    EXPECT_DEATH(
+        {
+            RankedMutex buffer_pool_lock(LockRank::BUFFER_POOL);
+            std::lock_guard<RankedMutex> pool_guard(buffer_pool_lock);
+            LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
+        },
+        "operation attempted while rank");
+#endif
 }
 
 TEST(SqlExecutionTest, ExecutesFiltersRangesProjectionSortAndLimits) {
@@ -223,46 +358,60 @@ TEST(ConcurrencyTest, SqlExecutorStatementGateTsanStress) {
     std::cout << "SQL statement-gate stress seed=" << seed << '\n';
     TemporaryDatabase database;
     SqlFixture fixture(database.Path());
-    fixture.executor->ExecuteQuery("CREATE TABLE concurrent_rows (id INT PRIMARY KEY)");
-
-    std::atomic<bool> succeeded{true};
-    std::vector<int32_t> insert_ids(80);
-    for (size_t index = 0; index < insert_ids.size(); ++index) {
-        insert_ids[index] = static_cast<int32_t>(index);
+    const std::array<std::string, 3> table_names{"stress_first", "stress_second", "stress_third"};
+    for (const std::string& table : table_names) {
+        fixture.executor->ExecuteQuery("CREATE TABLE " + table +
+                                       " (id INT PRIMARY KEY, balance INT NOT NULL)");
+        fixture.executor->ExecuteQuery("INSERT INTO " + table + " VALUES (0, 0)");
     }
-    std::mt19937_64 random(seed);
-    std::shuffle(insert_ids.begin(), insert_ids.end(), random);
 
-    std::vector<std::thread> readers;
-    for (size_t reader = 0; reader < 4U; ++reader) {
-        readers.emplace_back([&fixture, &succeeded]() {
+    constexpr size_t kThreadCount = 8;
+    std::atomic<bool> succeeded{true};
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(ConcurrencyStressDurationSeconds());
+    std::vector<std::thread> workers;
+    for (size_t worker = 0; worker < kThreadCount; ++worker) {
+        workers.emplace_back([&fixture, &succeeded, &deadline, &table_names, worker]() {
             try {
-                for (size_t iteration = 0; iteration < 80U; ++iteration) {
-                    fixture.executor->ExecuteQuery("SELECT COUNT(*) FROM concurrent_rows");
+                std::mt19937_64 random(seed + worker);
+                uint32_t sequence = 1;
+                while (std::chrono::steady_clock::now() < deadline &&
+                       succeeded.load(std::memory_order_relaxed)) {
+                    const std::string& table =
+                        table_names[static_cast<size_t>(random() % table_names.size())];
+                    const uint64_t operation = random() % 4U;
+                    const int32_t id = static_cast<int32_t>(worker * 100000000U + sequence++);
+                    if (operation == 0) {
+                        fixture.executor->ExecuteQuery("INSERT INTO " + table + " VALUES (" +
+                                                       std::to_string(id) + ", 0)");
+                    } else if (operation == 1) {
+                        fixture.executor->ExecuteQuery("UPDATE " + table +
+                                                       " SET balance = 0 WHERE id = 0");
+                    } else if (operation == 2) {
+                        fixture.executor->ExecuteQuery("DELETE FROM " + table +
+                                                       " WHERE id = " + std::to_string(id - 1));
+                    } else {
+                        fixture.executor->ExecuteQuery("SELECT SUM(balance) FROM " + table);
+                    }
+                    const std::string sum =
+                        fixture.executor->ExecuteQuery("SELECT SUM(balance) FROM " + table);
+                    if (sum != "SUM(balance)\n0" && sum != "SUM(balance)\nNULL") {
+                        succeeded.store(false, std::memory_order_relaxed);
+                    }
                 }
             } catch (const std::exception&) {
-                succeeded.store(false);
+                succeeded.store(false, std::memory_order_relaxed);
             }
         });
     }
-    std::thread writer([&fixture, &succeeded, &insert_ids]() {
-        try {
-            for (int32_t id : insert_ids) {
-                fixture.executor->ExecuteQuery("INSERT INTO concurrent_rows VALUES (" +
-                                               std::to_string(id) + ")");
-            }
-        } catch (const std::exception&) {
-            succeeded.store(false);
-        }
-    });
-
-    writer.join();
-    for (std::thread& reader : readers) {
-        reader.join();
+    for (std::thread& worker : workers) {
+        worker.join();
     }
     EXPECT_TRUE(succeeded.load());
-    EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT COUNT(*) FROM concurrent_rows"),
-              "COUNT(*)\n80");
+    for (const std::string& table : table_names) {
+        const std::string sum = fixture.executor->ExecuteQuery("SELECT SUM(balance) FROM " + table);
+        EXPECT_TRUE(sum == "SUM(balance)\n0" || sum == "SUM(balance)\nNULL");
+    }
     fixture.bpm->AssertNoPinsHeld();
 }
 

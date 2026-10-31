@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "clock_replacer.h"
+#include "concurrency.h"
 #include "config.h"
 #include "disk_manager.h"
 #include "page.h"
@@ -101,7 +102,7 @@ class BufferPoolManager {
     PageGuard Fetch(page_id_t page_id, GuardMode mode, bool allow_free_page = false);
     PageGuard AllocatePageFrame(page_id_t page_id);
     WritePageGuard AllocateFreePageGuarded(page_id_t page_id);
-    bool RetirePage(WritePageGuard& guard);
+    bool RetirePage(page_id_t page_id);
     static void ReleaseGuard(void* owner, Frame* frame, bool dirty,
                              std::thread::id origin_thread) noexcept;
     void ReleaseFrame(Frame* frame, bool dirty, std::thread::id origin_thread) noexcept;
@@ -126,9 +127,10 @@ class BufferPoolManager {
     std::unordered_set<page_id_t> free_pages_;
     std::unordered_map<std::thread::id, uint64_t> thread_pins_;
     std::vector<frame_id_t> free_list_;
-    mutable std::mutex pool_mutex_;
+    mutable RankedMutex pool_mutex_{LockRank::BUFFER_POOL};
     std::shared_ptr<WriteBackPolicy> write_back_policy_;
     std::shared_ptr<TxnContext> active_transaction_;
+    std::shared_ptr<TxnContext> active_transaction_snapshot_;
     WriteAheadLog* wal_{nullptr};
     bool checkpoint_in_progress_{false};
 

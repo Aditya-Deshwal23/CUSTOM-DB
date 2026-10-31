@@ -1,103 +1,115 @@
-# Concurrency model and known gaps
+# Concurrency model
 
-## Buffer pool
+## Statement contract
 
-`BufferPoolManager::pool_mutex_` protects the page table, free-frame/free-page
-lists, frame IDs, and I/O-state transitions. The replacer has its own mutex;
-when both are held, the order is pool mutex then replacer mutex. No disk read,
-write, extension, or sync is performed while holding the pool mutex.
+The engine uses a single-writer / multiple-reader gate at statement granularity.
+`SELECT`, `SHOW TABLES`, and `DESCRIBE` acquire the gate shared. `INSERT`,
+`UPDATE`, `DELETE`, DDL, and `CHECKPOINT` acquire it exclusively. The gate
+remains held until a write statement's WAL commit (and any automatic checkpoint
+attempt) has completed. An automatic checkpoint failure is logged without
+changing the successful result of the already-durable statement. A statement is
+atomic, durable, and serializable relative to other statements. Version 1 has
+no multi-statement transactions.
 
-Each frame has a read/write latch and a condition variable. A fetch that finds
-a `LOADING` or `WRITING_BACK` mapping waits on that frame's condition variable;
-the wait releases the pool mutex, and all waiters for the page use the same
-published frame. A miss reserves/remaps the frame and publishes its I/O state
-under the mutex, then performs eviction write-back and page read outside it.
-Failed I/O restores the old mapping and contents or returns a previously free
-frame.
+The gate prefers waiting writers over new readers. Admission is bounded to 64
+active statements and 128 queued statements by default. Waiting longer than
+`STATEMENT_GATE_TIMEOUT_MS` (1,000 ms) or exceeding the queue returns
+`DbError{BUSY, ...}`. The HTTP API maps `BUSY` to 503 and sends
+`Retry-After: 1`. The cooperative statement deadline is
+`STATEMENT_TIMEOUT_MS` (5,000 ms); executor loops check its cancellation token
+and report `QUERY_TIMEOUT`.
 
-The server reads `BUFFER_POOL_FRAMES` (default 4096; environment values below
-16 or outside the frame-ID range fail startup) and
-`BUFFER_POOL_POLICY=clock|lruk` (default `lruk`, K=2). Explicit constructor
-sizes remain available to tests, including smaller exhaustion/stress pools.
-`/api/buffer_pool` returns the 64-bit counters, pinned-frame gauge, and at most
-4096 frame snapshots.
+Every write appends its page images and COMMIT record to the WAL and syncs the
+WAL before returning, regardless of the configured background-sync mode. The
+exclusive statement gate is therefore still held across the complete durable
+commit boundary. WAL modes may control background synchronization, but cannot
+weaken the statement-commit guarantee.
 
-Fetches pin before acquiring a page latch and acquire that latch only after
-releasing the pool mutex. Guards release the page latch before decrementing the
-pin under the pool mutex. `FlushFrame` takes the page latch and briefly reads
-frame metadata under the pool mutex; the pool mutex is never held while waiting
-for a page latch. `PageAllocator` accesses page-zero metadata and page contents
-through guards. Page retirement marks the frame unavailable before write-back,
-then removes its mapping and records its free-list status.
+## Lock order
 
-`AssertNoPinsHeld()` checks guards owned by the calling thread, so the Debug
-HTTP request check is not confused by unrelated concurrent requests. The
-`pinned_frames()` gauge remains pool-wide. A guard must not outlive its
-`BufferPoolManager` or be destroyed on a different thread from the one that
-acquired its page latch.
+The single lock order is:
 
-## Table heap
+1. statement gate
+2. catalog
+3. buffer-pool page-table mutex
+4. frame latch
+5. disk/WAL mutex
 
-`TableHeap` uses page guards for every header/data-page access and retains at
-most one page guard in a `TableIterator`. Buffer-pool latches protect individual
-pages, but `TableHeap` does not serialize concurrent insert, update, delete, or
-reclaimed-page-set operations. Direct callers must provide synchronization.
-`Executor`'s statement gate protects SQL heap use: SELECT takes a shared lock;
-DDL and DML take the exclusive lock. This prevents scans from overlapping a
-mutation and serializes writers.
+Debug builds track ranked locks in thread-local state and abort immediately if
+a thread tries to acquire a lower-ranked lock while holding a higher-ranked
+one. The statement gate participates in the checker, as do the catalog gate,
+buffer-pool mutex, frame latches, disk metadata/descriptor mutexes, and WAL
+mutex. Disk/WAL I/O entry points also assert that the buffer-pool mutex is not
+held. Equal-rank locks are allowed, but code must not wait for another page
+while retaining a frame latch.
 
-## B+ tree and statement gate
+No disk read, write, extension, or sync occurs under the buffer-pool page-table
+mutex. A fetch reserves and publishes a frame under that mutex, performs disk
+I/O after releasing it, then publishes the ready frame while acquiring the
+frame latch in the documented order. Buffer-pool waits release the page-table
+mutex. Guards release their frame latch before returning the pin under the
+page-table mutex. On POSIX, page I/O uses positional calls rather than a global
+I/O mutex; Windows uses a ranked descriptor mutex.
 
-The B+ tree itself does not provide tree-level synchronization or latch
-crabbing. Its caller must enforce the Phase 8 statement-gate contract: one
-writer at a time, or multiple readers with no concurrent writer. Operations
-retain only the current page guard except while adjusting a parent/sibling;
-the descent path stores page IDs and child indexes, not parent pointers.
-`Executor` implements the gate with a per-instance `std::shared_mutex`: SQL
-DDL/DML and legacy INSERT take the exclusive lock; SELECT/range reads take
-shared locks. The tree's page guards still protect individual page bodies and
-scans retain one leaf guard at a time. Direct B+ tree callers must provide the
-same gate themselves.
+Page latches protect an individual frame while its contents are read or
+changed, and while frame state is used for I/O/eviction. They are not a
+concurrent B+ tree writer protocol. The B+ tree requires no latch crabbing
+under the statement gate: its descent stores page IDs, page guards are released
+before following/fetching another page, and split/rebalance edits copy page
+contents and write affected pages one at a time. Index iterators release the
+leaf guard before returning a row to the executor. Direct B+ tree and
+`TableHeap` callers outside `Executor` must provide equivalent statement-level
+synchronization.
 
-This is not latch crabbing and does not permit a tree writer to run concurrently
-with readers. `TableHeap` has no independent concurrent-writer protocol; the
-executor gate also serializes its heap writes and guards heap reads against
-those writes.
+## Admission, cancellation, and statement scope
 
-## WAL and checkpointing
+`StatementScope` is RAII: it acquires the shared or exclusive gate with the
+earlier of the statement deadline and gate timeout, owns the cancellation
+token, and releases the gate on every exit path. SQL DML and DDL run within one
+WAL transaction; failures roll back before the scope releases the gate.
+Cancellation is cooperative and checked in scan/execute loops; it does not
+interrupt a blocking operating-system I/O call.
 
-The buffer pool permits one active write transaction. Its first write-guard
-touch snapshots the page while holding that page's write latch, then briefly
-takes `pool_mutex_`; no code waits for a page latch while holding the pool
-mutex. Active transaction pages are excluded from eviction and flush. WAL
-write-back checks happen outside `pool_mutex_` and enforce the page-LSN
-durability boundary before database I/O.
+The gate is per `Executor`, shared with its SQL engine. The separate catalog
+gate is ranked after the statement gate so catalog reload/persistence cannot
+race readers. The buffer pool still provides internal page safety, but direct
+low-level mutation APIs do not create an SQL statement or transaction.
 
-Checkpointing sets a gate under `pool_mutex_`, then releases the mutex before
-page I/O, database sync, WAL sync, and WAL replacement. New transactions are
-rejected while the gate is active. The WAL mutex serializes log operations and
-the periodic `normal`-mode sync thread; neither takes `pool_mutex_`. The
-checkpoint order is pool gate, page latch as needed, then WAL latch for
-write-ahead sync; no path holds the WAL latch while acquiring a page latch or
-the pool mutex.
+## Buffer pool, table heap, and WAL
 
-## Other lock interactions
+The buffer-pool mutex protects the page table, frame allocation, pin counts,
+and I/O-state transitions. The replacer mutex is acquired only while holding
+the pool mutex. Frame latches are acquired only after releasing the pool mutex,
+except for publishing a just-loaded frame while the pool mutex is held; that
+frame is still marked loading and cannot be fetched by another operation.
+Disk I/O always occurs outside the pool mutex.
 
-`FileDiskManager::header_mutex_` serializes page-zero metadata reads/writes and
-file extension. POSIX page reads and writes use positional I/O and do not take
-a global disk-I/O mutex. Windows seek-plus-I/O uses its descriptor mutex.
+`TableHeap` uses page guards for headers and rows. Its iterator copies one page
+at a time and releases the guard before returning a row; executor statement
+scopes prevent scans from overlapping heap mutations. The B+ tree similarly
+relies on the executor gate rather than tree-level crabbing.
 
-## Validation and known gaps
+The buffer pool permits one active write transaction. Before-images are
+captured on first mutation, and active transaction pages cannot be evicted or
+flushed. WAL commit takes the WAL mutex only after page work; write-back checks
+the committed page LSN before database I/O. Checkpointing is an exclusive
+statement and performs page I/O and sync outside the pool mutex. No code holds
+the WAL mutex while acquiring the pool mutex or a frame latch.
 
-`BufferPoolStressTest.SixteenThreadsOneMillionVerifiedOperations` exercises
-16 threads with one million page-ID/CRC-verified operations per thread and
-prints its seed. `DiskManagerTest.ConcurrentDistinctPageIo` exercises
-independent page I/O. `ConcurrencyTest.SqlExecutorStatementGateTsanStress`
-mixes shared SQL reads with an exclusively gated writer, prints its shuffle
-seed, and runs in the CI TSan job. These stress tests do not make direct
-unsynchronized `TableHeap` or B+ tree access safe.
+## Verification
 
-The WAL's no-steal rule is enforced by transaction page snapshots and
-write-back checks. Direct buffer-pool write access remains a low-level API:
-callers using a durable executor must use its transaction gate and WAL-backed
-write path.
+The CI TSan job runs `ConcurrencyTest.ReaderWriterTsanClean`,
+`ConcurrencyTest.ExecutorStatementGateTsanClean`, and the seeded SQL
+statement-gate stress test. The SQL stress uses eight threads, three tables,
+random `SELECT`/`INSERT`/`UPDATE`/`DELETE` statements, and checks that every
+observed balance sum remains zero. PR TSan runs it for 10 seconds;
+`RELDB_CONCURRENCY_STRESS_SECONDS=60` enables the nightly duration. Each
+workload prints its seed. The writer-preference test keeps eight readers in a
+tight acquire/release loop and bounds writer wait to two seconds.
+`ConcurrencyTest.GateTimeoutAndQueueOverflowReturnBusy` verifies the typed
+`BUSY` result for a timed-out waiter and a full admission queue.
+
+`BufferPoolStressTest.SixteenThreadsOneMillionVerifiedOperations` and
+`DiskManagerTest.ConcurrentDistinctPageIo` separately exercise buffer-pool
+and disk-manager concurrency. These tests do not make unsynchronized direct
+`TableHeap` or B+ tree use safe.

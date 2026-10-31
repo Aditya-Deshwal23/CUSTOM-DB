@@ -94,29 +94,38 @@ void Executor::InitializeHeap() {
 }
 
 std::string Executor::ExecuteQuery(const std::string& query) {
-    std::vector<SqlToken> tokens;
     try {
-        tokens = SqlLexer::Tokenize(query);
-    } catch (const SqlError&) {
-        return sql_engine_->Execute(query);
-    }
-    size_t content_end = tokens.size() - 1U;
-    if (content_end != 0U && tokens[content_end - 1U].kind == SqlTokenKind::SEMICOLON) {
-        --content_end;
-    }
-    if (content_end == 3U && tokens[1].kind == SqlTokenKind::INTEGER &&
-        tokens[2].kind == SqlTokenKind::INTEGER && EqualsIgnoreCase(tokens[0].text, "INSERT")) {
-        std::string result = ExecuteLegacyQuery(query);
+        std::vector<SqlToken> tokens;
+        try {
+            tokens = SqlLexer::Tokenize(query);
+        } catch (const SqlError&) {
+            std::string result = sql_engine_->Execute(query);
+            bpm_->AssertNoPinsHeld();
+            return result;
+        }
+        size_t content_end = tokens.size() - 1U;
+        if (content_end != 0U && tokens[content_end - 1U].kind == SqlTokenKind::SEMICOLON) {
+            --content_end;
+        }
+        if (content_end == 3U && tokens[1].kind == SqlTokenKind::INTEGER &&
+            tokens[2].kind == SqlTokenKind::INTEGER && EqualsIgnoreCase(tokens[0].text, "INSERT")) {
+            std::string result = ExecuteLegacyQuery(query);
+            bpm_->AssertNoPinsHeld();
+            return result;
+        }
+        if (content_end == 2U && tokens[1].kind == SqlTokenKind::INTEGER &&
+            EqualsIgnoreCase(tokens[0].text, "SELECT")) {
+            std::string result = ExecuteLegacyQuery(query);
+            bpm_->AssertNoPinsHeld();
+            return result;
+        }
+        std::string result = sql_engine_->Execute(query);
         bpm_->AssertNoPinsHeld();
         return result;
-    }
-    if (content_end == 2U && tokens[1].kind == SqlTokenKind::INTEGER &&
-        EqualsIgnoreCase(tokens[0].text, "SELECT")) {
-        std::string result = ExecuteLegacyQuery(query);
+    } catch (const std::exception&) {
         bpm_->AssertNoPinsHeld();
-        return result;
+        throw;
     }
-    return sql_engine_->Execute(query);
 }
 
 std::string Executor::ExecuteLegacyQuery(const std::string& query) {
@@ -136,7 +145,11 @@ std::string Executor::ExecuteLegacyQuery(const std::string& query) {
         if (!ParseInt32(tokens[1].text, key) || !ParseInt64(tokens[2].text, value)) {
             return "Syntax error: INSERT <key> <value>";
         }
-        std::unique_lock<std::shared_mutex> lock(statement_gate_);
+        StatementScope scope(statement_gate_, true);
+        if (wal_ == nullptr) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT,
+                          "Legacy INSERT requires a WAL-backed Executor");
+        }
         const IndexKey16 index_key = EncodeIndexKey(key);
         if (tree_->GetValue(index_key)) {
             throw DbError(ErrorCode::DUPLICATE_KEY, "Duplicate key in SQL index");
@@ -170,7 +183,7 @@ std::string Executor::ExecuteLegacyQuery(const std::string& query) {
         if (!ParseInt32(tokens[1].text, key)) {
             return "Syntax error: SELECT <key>";
         }
-        std::shared_lock<std::shared_mutex> lock(statement_gate_);
+        StatementScope scope(statement_gate_, false);
         const std::optional<uint64_t> packed_rid = tree_->GetValue(EncodeIndexKey(key));
         if (packed_rid) {
             const std::optional<Tuple> tuple = heap_->Get(RID::Unpack(*packed_rid));
@@ -189,10 +202,16 @@ std::string Executor::ExecuteLegacyQuery(const std::string& query) {
 
 std::vector<Row> Executor::ScanWithPredicate(int start_key, int end_key, Predicate pred) {
     std::vector<Row> results;
-    std::shared_lock<std::shared_mutex> lock(statement_gate_);
-    const auto entries = tree_->RangeScan(EncodeIndexKey(start_key), EncodeIndexKey(end_key));
-    for (const auto& entry : entries) {
-        const std::optional<Tuple> tuple = heap_->Get(RID::Unpack(entry.second));
+    StatementScope scope(statement_gate_, false);
+    const IndexKey16 high = EncodeIndexKey(end_key);
+    IndexKey16Less less;
+    auto iterator = tree_->LowerBound(EncodeIndexKey(start_key));
+    while (std::optional<std::pair<IndexKey16, uint64_t>> entry = iterator.Next()) {
+        scope.Cancellation().Check();
+        if (!less(entry->first, high)) {
+            break;
+        }
+        const std::optional<Tuple> tuple = heap_->Get(RID::Unpack(entry->second));
         if (!tuple) {
             throw DbError(ErrorCode::PAGE_CORRUPT, "Index RID does not reference a live SQL row");
         }
@@ -206,7 +225,7 @@ std::vector<Row> Executor::ScanWithPredicate(int start_key, int end_key, Predica
 }
 
 std::optional<std::string> Executor::IntegrityCheck() {
-    std::shared_lock<std::shared_mutex> lock(statement_gate_);
+    StatementScope scope(statement_gate_, false);
     try {
         bpm_->VerifyDiskPages();
     } catch (const DbError& error) {

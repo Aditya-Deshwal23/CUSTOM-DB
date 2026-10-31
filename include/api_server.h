@@ -119,6 +119,13 @@ public:
                 CheckForLeakedPins();
                 crow::json::wvalue res;
                 res["status"] = "error";
+                if (error.Code() == ErrorCode::BUSY) {
+                    res["code"] = "BUSY";
+                    res["message"] = error.what();
+                    crow::response response(503, res);
+                    response.add_header("Retry-After", "1");
+                    return response;
+                }
                 res["code"] = error.Code() == ErrorCode::DUPLICATE_KEY ? "DUPLICATE_KEY"
                                                                         : "DATABASE_ERROR";
                 res["message"] = error.what();

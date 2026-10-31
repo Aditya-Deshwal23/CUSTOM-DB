@@ -134,9 +134,9 @@ reached 89.48% at 40,000 keys; seeded random insertion reached 70.87% at
 
 `bench/wal_bench.cpp` measures one transaction inserting four distinct B+ tree
 keys per statement under `full`, `normal`, and `off`. It reports mean wall
-latency and processed-key throughput. The benchmark uses a 20 ms interval for
-`normal` so the interval sync thread runs during the short measurement; the
-production default is 1000 ms. One fixture initialization and cleanup is
+latency and processed-key throughput. Every commit syncs the WAL in all three
+modes; `normal` additionally runs a 20 ms periodic sync thread, while `off`
+disables that background thread. One fixture initialization and cleanup is
 amortized across the iterations. The checkpoint benchmark builds 256 rows
 outside the timed interval, then measures `Checkpoint()` including dirty-page
 write-back, database sync, and WAL replacement.
@@ -144,13 +144,15 @@ write-back, database sync, and WAL replacement.
 Command:
 
 ```sh
-ALLOW_UNSAFE=1 ./build-release/reldb_wal_benchmarks --benchmark_min_time=0.1s
+./build-release/reldb_wal_benchmarks --benchmark_min_time=0.1s
 ```
 
 Observed on 2026-10-30, Apple M5 (`arm64`), macOS 27.0.1, Apple Clang 21,
 Google Benchmark 1.8.3, Release build. CPU frequency and thread-affinity
-metadata were unavailable. These are local observations, not CI thresholds.
-`off` is enabled only for this benchmark process with `ALLOW_UNSAFE=1`.
+metadata were unavailable. These are historical local observations from before
+every commit was changed to sync the WAL; they are not current performance
+measurements or CI thresholds and should not be compared to the new benchmark
+run.
 
 | Mode/workload | Mean latency | Key throughput |
 |---|---:|---:|
@@ -166,15 +168,46 @@ then reports mean wall latency for 100 indexed point selects, 100 indexed
 100-row range selects, 100 single-row inserts, 100 single-row updates, and
 five full-scan aggregate queries. Dataset setup is excluded from timed
 intervals. Each scale uses a fresh temporary database and removes it afterward.
-The benchmark explicitly uses WAL `off`; this is unsafe for real data and is
-enabled only with `ALLOW_UNSAFE=1`. These timings do not measure durable commit
-latency.
+The benchmark disables only periodic WAL sync; every statement still syncs its
+COMMIT, so these timings include durable commit latency. The existing values
+below predate that change and are historical, not current measurements.
 
 Command:
 
 ```sh
-ALLOW_UNSAFE=1 ./build-release/reldb_sql_execution_benchmarks
+./build-release/reldb_sql_execution_benchmarks
 ```
 
 The target prints the exact per-scale results on the host where it is run.
 Local results are observations, not CI performance gates.
+
+## Statement concurrency
+
+`bench/concurrency_bench.cpp` measures indexed point-SELECT throughput at
+1/2/4/8 threads and an 8-thread 95/5 point-SELECT/no-op-UPDATE mix. Each run
+uses a fixed seed (`0xC0FFEE`); the read-only runs execute 4,000 operations per
+thread and the mixed workload executes 2,000 per thread. Latencies are sampled
+per statement. The no-op UPDATE still commits a transaction and syncs its WAL
+record, so the mixed p50/p99 include durable-write latency.
+
+Command:
+
+```sh
+./build-release/reldb_concurrency_benchmarks
+```
+
+Observed on 2026-10-31, Apple M5 (`arm64`), macOS 27.0.1, Apple Clang 21,
+Release build:
+
+| Workload | Threads | Throughput | p50 latency | p99 latency |
+|---|---:|---:|---:|---:|
+| Point SELECT | 1 | 329,820 ops/s | 2.875 us | 5.541 us |
+| Point SELECT | 2 | 259,527 ops/s | 6.750 us | 18.833 us |
+| Point SELECT | 4 | 239,791 ops/s | 13.709 us | 55.750 us |
+| Point SELECT | 8 | 186,741 ops/s | 38.917 us | 112.959 us |
+| 95/5 SELECT/UPDATE | 8 | 114,174 ops/s | 43.500 us | 320.792 us |
+
+These are local observations, not performance guarantees or CI thresholds.
+Read scaling decreases on this host as threads contend for shared engine
+resources; rerun on the deployment hardware before drawing capacity
+conclusions.
