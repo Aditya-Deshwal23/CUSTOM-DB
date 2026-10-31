@@ -32,12 +32,17 @@ jobs:
         run: scripts/verify_disk_syncs.sh build/reldb_disk_sync_probe
       - name: Check metrics honesty
         run: build/reldb_regression_tests --gtest_filter=MetricsTest.NoFabricatedValues
+      - name: Check dashboard honesty
+        run: python3 scripts/check_dashboard_honesty.py
       - name: SQLite SQL differential (10,000 statements)
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         run: python3 tools/difftest.py --binary build/relational_db --statements 10000
       - name: Verify SQL execution benchmark target
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         run: cmake --build build --target reldb_sql_execution_benchmarks --parallel
+      - name: Smoke-test the SQLite comparison benchmark
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: python3 tools/benchmark_sqlite.py --binary build/relational_db --rows 1000 --iterations 100 --repetitions 1 --seed 1337
       - name: Verify HTTP examples and shutdown
         run: scripts/verify_resume_claims.sh
       - name: Set up Python for API contract tests
@@ -47,12 +52,23 @@ jobs:
           python-version: "3.12"
       - name: Install API test dependencies
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
-        run: python -m pip install -r tests/api/requirements.txt
+        run: |
+          python -m pip install -r tests/api/requirements.txt
+          python -m pip install -r tests/dashboard/requirements.txt
+          python -m playwright install --with-deps chromium
       - name: Run real-binary API contract tests
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         env:
           RELDB_SERVER_BINARY: ${{ github.workspace }}/build/relational_db
         run: python -m pytest -q tests/api
+      - name: Run real-binary dashboard browser smoke test
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        env:
+          RELDB_SERVER_BINARY: ${{ github.workspace }}/build/relational_db
+        run: python -m pytest -q tests/dashboard
+      - name: Lighthouse performance and accessibility audit
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: python scripts/run_lighthouse.py --binary build/relational_db --output docs/lighthouse-report.json
       - name: Fuzz HTTP API input (200 seeded requests)
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         run: python tests/api/fuzz_api.py --binary build/relational_db --iterations 200 --seed 731291
@@ -69,6 +85,72 @@ jobs:
             build/Testing/Temporary/LastTestsFailed.log
             build/server.log
           if-no-files-found: ignore
+
+  coverage:
+    name: gcovr component coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install gcovr
+        run: python -m pip install gcovr
+      - name: Configure coverage build
+        run: >-
+          cmake -S . -B build-coverage
+          -DCMAKE_BUILD_TYPE=Debug
+          -DRELDB_WERROR=ON
+          -DRELDB_BUILD_BENCHMARKS=OFF
+          -DCMAKE_CXX_FLAGS="--coverage -fprofile-abs-path -O0 -g"
+          -DCMAKE_EXE_LINKER_FLAGS=--coverage
+      - name: Build and run tests
+        run: |
+          cmake --build build-coverage --parallel
+          ctest --test-dir build-coverage --output-on-failure
+      - name: Generate gcovr reports for storage, index, WAL, and SQL
+        run: |
+          mkdir -p coverage
+          {
+            echo "# Line coverage by component"
+            echo
+            echo "Target: at least 80% line coverage for each listed component."
+            echo "This report publishes measured coverage; the target is not asserted until the baseline meets it."
+            for component in storage index wal sql; do
+              case "${component}" in
+                storage) filter='src/storage/.*|src/slotted_page\.cpp' ;;
+                index) filter='src/b_plus_tree\.cpp|src/catalog\.cpp' ;;
+                wal) filter='src/wal\.cpp|src/crc32c\.cpp' ;;
+                sql) filter='src/sql_parser\.cpp|src/sql_executor\.cpp|src/executor\.cpp' ;;
+              esac
+              gcovr --root . --filter "${filter}" --txt-summary \
+                > "coverage/${component}-summary.txt"
+              gcovr --root . --filter "${filter}" \
+                --html-details "coverage/${component}.html"
+              echo "## ${component}"
+              echo '```text'
+              cat "coverage/${component}-summary.txt"
+              echo '```'
+              echo
+            done
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+      - name: Upload component coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcovr-component-coverage
+          path: coverage/
+          if-no-files-found: error
+
+  link-check:
+    name: Markdown link check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check documentation links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --verbose --no-progress README.md docs/ LICENSE DIFFICULTIES_FACED.md
+          fail: true
 
   asan-ubsan:
     name: Address and undefined behavior sanitizers
@@ -169,4 +251,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build image without pushing
-        run: docker build --tag custom-db:ci .
+        run: docker build --tag custom-db:ci --build-arg VERSION=ci --build-arg VCS_REF=${GITHUB_SHA} .
+      - name: Run the README quickstart against the built image
+        env:
+          IMAGE: custom-db:ci
+          HOST_PORT: "18081"
+        run: scripts/quickstart.sh
+      - name: Verify container crash recovery and graceful shutdown
+        env:
+          IMAGE: custom-db:ci
+          VOLUME: custom-db-ci-${{ github.run_id }}
+          HOST_PORT: "18080"
+        run: scripts/demo_crash.sh
+      - name: Scan image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: custom-db:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL

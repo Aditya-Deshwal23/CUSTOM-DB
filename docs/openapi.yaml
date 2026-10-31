@@ -285,6 +285,18 @@ components:
           type: string
         type:
           type: string
+        primary_key:
+          type: boolean
+        references:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [table, column]
+              properties:
+                table:
+                  type: string
+                column:
+                  type: string
     QuerySuccess:
       type: object
       required:

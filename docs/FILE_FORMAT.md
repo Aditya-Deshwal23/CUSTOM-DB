@@ -180,13 +180,14 @@ little-endian encoding, not a native C++ structure:
 
 | Field | Encoding |
 |---|---|
-| Version | `u32` (`1`) |
+| Version | `u32` (`2`; version `1` remains readable) |
 | Table count | `u16` |
 | Table name | `u16` byte length, then UTF-8 bytes |
 | Heap header page ID | `u32` page ID |
 | Column count | `u16` |
 | Primary-key column | `u16` ordinal; `0xffff` means none |
-| Each column | name string, `u8` type enum, `u16` VARCHAR length, `u8` NOT NULL flag |
+| Each column (v1) | name string, `u8` type enum, `u16` VARCHAR length, `u8` NOT NULL flag |
+| Each column (v2) | v1 fields, `u8` REFERENCES-present flag, then referenced table and column strings when present |
 | Index count | `u16` |
 | Each index | name string, `u16` column ordinal, `u8` unique flag, `u32` metadata page ID |
 
@@ -229,7 +230,8 @@ bits 0-15; bits 48-63 are reserved and must be zero.
 
 ## Write-ahead log
 
-The WAL path is `<DB_PATH>-wal`. All multibyte values are explicit
+The default WAL path is `<DB_PATH>-wal`; `WAL_PATH` can select another path.
+All multibyte values are explicit
 little-endian; no host structure layout is written to disk. WAL and page
 checksums use CRC32C.
 

@@ -581,6 +581,12 @@ void AddHistogramJson(crow::json::wvalue& target, const HistogramSnapshot& snaps
     target["p50_us"] = snapshot.P50();
     target["p95_us"] = snapshot.P95();
     target["p99_us"] = snapshot.P99();
+    crow::json::wvalue::list buckets;
+    buckets.reserve(snapshot.buckets.size());
+    for (uint64_t bucket : snapshot.buckets) {
+        buckets.emplace_back(bucket);
+    }
+    target["buckets"] = std::move(buckets);
 }
 
 }  // namespace
@@ -670,6 +676,16 @@ void ApiServer::Impl::RegisterRoutes() {
                     crow::json::wvalue column;
                     column["name"] = column_info.name;
                     column["type"] = ColumnTypeName(column_info.type);
+                    column["primary_key"] = table->schema.primary_key &&
+                                            *table->schema.primary_key ==
+                                                static_cast<size_t>(&column_info -
+                                                                    table->schema.columns.data());
+                    if (column_info.references) {
+                        column["references"]["table"] = column_info.references->table;
+                        column["references"]["column"] = column_info.references->column;
+                    } else {
+                        column["references"] = crow::json::wvalue(nullptr);
+                    }
                     columns.push_back(std::move(column));
                 }
                 response["schema"] = std::move(columns);

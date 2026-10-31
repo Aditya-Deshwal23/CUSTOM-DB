@@ -73,27 +73,22 @@ Render:
 - Set `DB_PATH` to a path on a mounted persistent disk, for example `/data/custom.db`.
 - Mount persistent storage at `/data`.
 
-The dashboard uses same-origin API calls when served by the backend, so production requests go to `/api/metrics` and `/api/query` on the same host.
+The dashboard uses same-origin requests to `/api/v1/query`, `/api/v1/stats`, `/api/v1/stats/buffer_pool`, `/api/v1/stats/storage`, `/api/v1/tables`, and `/api/v1/version`. The deprecated `/api/metrics` and `/api/query` routes remain available to existing clients.
 
-## Local Dashboard Demo Mode
+## Local Dashboard
 
-If you only want to demo the frontend without the C++ engine running:
+When serving the dashboard separately for development, requests target the local engine at `127.0.0.1:8080`. Without a reachable engine the page explicitly shows an offline/waking state and retries with backoff; it does not switch to fabricated values.
 
 ```bash
 cd dashboard
 python -m http.server 5500
 ```
 
-Visit [http://localhost:5500](http://localhost:5500). The dashboard keeps a localhost backend fallback for ports `5500` and `5501`; if the backend is unavailable, it reverts to simulation mode.
+Visit [http://localhost:5500](http://localhost:5500). The engine must also be running at port `8080`. To record a real session for `?replay=1`, run `python3 scripts/record_session.py`; the output defaults to `dashboard/replay/session.json`.
 
 ## Supported Console Commands
 
-The executor accepts these integer commands:
-
-- `INSERT 42 100`
-- `SELECT 42`
-
-`SELECT * FROM Users` is not supported; there is no SQL table/schema implementation.
+The console accepts the SQL subset documented in [docs/SQL_EXECUTION.md](docs/SQL_EXECUTION.md). Results and errors are returned by `POST /api/v1/query`. Legacy integer commands remain available on the deprecated `/api/query` endpoint.
 
 ## Tests and checks
 

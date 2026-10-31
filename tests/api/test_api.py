@@ -199,6 +199,8 @@ def test_sql_result_parameters_tables_and_stats(api_server):
     assert tables_status == 200 and "api_contract" in tables["tables"]
     assert detail_status == 200 and detail["row_estimate"] == 1
     assert detail["schema"][0]["name"] == "id"
+    assert detail["schema"][0]["primary_key"] is True
+    assert detail["schema"][1]["primary_key"] is False
     assert any(index["unique"] for index in detail["indexes"])
     assert stats_status == 200 and stats["buffer_pool"]["hits"] >= 0
     assert stats["statements"]["ddl"] - baseline["statements"]["ddl"] == 1
@@ -213,6 +215,69 @@ def test_sql_result_parameters_tables_and_stats(api_server):
     assert storage_status == 200
     assert storage_stats["file_size_bytes"] == storage_stats["page_count"] * 4096
     assert storage_stats["recovery"]["ran"] is True
+
+
+def test_catalog_foreign_keys_and_stats_histograms(api_server):
+    assert post_sql(api_server, "CREATE TABLE demo_users (id INT PRIMARY KEY)")[0] == 200
+    assert post_sql(
+        api_server,
+        "CREATE TABLE demo_orders (id INT PRIMARY KEY, user_id INT REFERENCES demo_users(id))",
+    )[0] == 200
+    assert post_sql(api_server, "INSERT INTO demo_users VALUES (1)")[0] == 200
+    assert post_sql(api_server, "INSERT INTO demo_orders VALUES (1, 1)")[0] == 200
+
+    tables_status, tables, _ = request_json(api_server, "/api/v1/tables")
+    orders_status, orders, _ = request_json(api_server, "/api/v1/tables/demo_orders")
+    stats_status, stats, _ = request_json(api_server, "/api/v1/stats")
+    assert tables_status == 200 and "demo_orders" in tables["tables"]
+    assert orders_status == 200
+    assert orders["schema"][1]["references"] == {
+        "table": "demo_users",
+        "column": "id",
+    }
+    assert stats_status == 200
+    assert stats["statement_duration_us"]["select"]["buckets"]
+    assert stats["disk"]["read_latency_us"]["buckets"]
+
+    missing_status, missing, _ = post_sql(
+        api_server, "INSERT INTO demo_orders VALUES (2, 999)"
+    )
+    assert missing_status == 409
+    assert missing["error"]["code"] == "FK_VIOLATION"
+    delete_status, delete_error, _ = post_sql(
+        api_server, "DELETE FROM demo_users WHERE id = 1"
+    )
+    assert delete_status == 409 and delete_error["error"]["code"] == "FK_VIOLATION"
+    update_status, update_error, _ = post_sql(
+        api_server, "UPDATE demo_users SET id = 3 WHERE id = 1"
+    )
+    assert update_status == 409 and update_error["error"]["code"] == "FK_VIOLATION"
+    drop_status, drop_error, _ = post_sql(api_server, "DROP TABLE demo_users")
+    assert drop_status == 409 and drop_error["error"]["code"] == "FK_VIOLATION"
+
+
+def test_catalog_foreign_keys_survive_restart(tmp_path):
+    database = tmp_path / "foreign-keys.db"
+    with running_server(tmp_path, db_path=database) as (base_url, _):
+        assert post_sql(base_url, "CREATE TABLE fk_parent (id INT PRIMARY KEY)")[0] == 200
+        assert post_sql(
+            base_url, "CREATE TABLE fk_child (id INT PRIMARY KEY, parent_id INT REFERENCES fk_parent(id))"
+        )[0] == 200
+
+    with running_server(tmp_path, db_path=database) as (base_url, _):
+        status, child, _ = request_json(base_url, "/api/v1/tables/fk_child")
+        assert status == 200
+        assert child["schema"][1]["references"] == {
+            "table": "fk_parent",
+            "column": "id",
+        }
+        violation, result, _ = post_sql(base_url, "INSERT INTO fk_child VALUES (1, 123)")
+        assert violation == 409 and result["error"]["code"] == "FK_VIOLATION"
+
+
+def test_static_dashboard_security_headers(api_server):
+    _, _, headers = http_request(api_server, "/")
+    assert headers["Content-Security-Policy"].startswith("default-src 'self'")
 
 
 def test_malformed_json_body_limit_and_content_type(api_server, tmp_path):
@@ -322,10 +387,13 @@ def test_database_quota_returns_507(tmp_path):
 
 
 def test_invalid_cors_configuration_fails_startup(tmp_path):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
     env = os.environ.copy()
     env.update(
         {
-            "PORT": "0",
+            "PORT": str(port),
             "DB_PATH": str(tmp_path / "invalid-cors.db"),
             "CORS_ORIGINS": "httpx://invalid.example",
         }

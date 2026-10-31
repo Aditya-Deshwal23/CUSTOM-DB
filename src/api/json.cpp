@@ -75,7 +75,8 @@ void ApplyResponseHeaders(crow::response& response) {
     response.add_header("X-Content-Type-Options", "nosniff");
     response.add_header("X-Frame-Options", "DENY");
     response.add_header("Referrer-Policy", "no-referrer");
-    response.add_header("Content-Security-Policy", "default-src 'self'");
+    response.add_header("Content-Security-Policy",
+                        "default-src 'self'; connect-src 'self' http://127.0.0.1:8080");
 }
 
 std::string BindParameters(const std::string& sql, const crow::json::rvalue& params) {

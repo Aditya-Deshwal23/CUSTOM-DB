@@ -1,0 +1,13 @@
+{"version":2,"width":120,"height":36,"timestamp":1793469328,"env":{"SHELL":"/bin/bash","TERM":"xterm-256color"}}
+[2.368667,"o","Hard-killing custom-db-crash-37105-before during the write loop\n"]
+[2.553268,"o","{\"acknowledged\": 1752, \"writer_stopped\": \"Remote end closed connection without response\"}\n"]
+[2.876788,"o","Recovery log:\n"]
+[2.899933,"o","{\"level\":\"info\",\"event\":\"wal_recovery\",\"fields\":{\"records\":5358,\"commits\":1754,\"pages_replayed\":3604,\"truncated_bytes\":14910350,\"elapsed_ms\":39}}\n{\"level\":\"info\",\"event\":\"effective_config\",\"fields\":{\"PORT\":8080,\"DB_PATH\":\"/data/custom.db\",\"WAL_PATH\":\"/data/custom.db-wal\",\"BUFFER_POOL_FRAMES\":4096,\"BUFFER_POOL_POLICY\":\"lruk\",\"DURABILITY\":\"full\",\"WAL_MAX_BYTES\":16777216,\"WAL_SYNC_INTERVAL_MS\":1000,\"READ_ONLY\":false,\"API_KEY\":\"\",\"CORS_ORIGINS\":[],\"MAX_BODY_BYTES\":65536,\"MAX_SQL_BYTES\":16384,\"MAX_RESULT_ROWS\":1000,\"STATEMENT_TIMEOUT_MS\":2000,\"RATE_LIMIT_RPS\":1000.000000,\"RATE_LIMIT_BURST\":2000.000000,\"MAX_DB_BYTES\":0,\"LOG_LEVEL\":\"info\",\"DEMO_LOAD\":false,\"SLOW_QUERY_MS\":0,\"DRAIN_TIMEOUT_MS\":5000,\"ALLOW_UNSAFE\":false}}\n{\"level\":\"info\",\"event\":\"service_starting\",\"message\":\"Starting HTTP service\"}\n{\"level\":\"info\",\"event\":\"http_server\",\"message\":\"Crow/1.1.0 server is running at http://0.0.0.0:8080 using 10 threads\"}\n{\"level\":\"info\",\"event\":\"http_server\",\"message\":\"Call `app.loglevel(crow::LogLevel::Warning)` to hide I"]
+[2.899953,"o","nfo level logs.\"}\n{\"level\":\"info\",\"event\":\"http_server\",\"message\":\"Request: 192.168.65.1:31746 0xffff9c007180 HTTP/1.1 GET /readyz\"}\n{\"level\":\"info\",\"event\":\"http_server\",\"message\":\"Response: 0xffff9c007180 /readyz 200 1\"}\n"]
+[3.024688,"o","Integrity check:\n"]
+[3.077152,"o","{\"level\":\"info\",\"event\":\"wal_recovery\",\"fields\":{\"records\":0,\"commits\":0,\"pages_replayed\":0,\"truncated_bytes\":0,\"elapsed_ms\":9}}\n"]
+[3.087823,"o","{\"ok\":true,\"command\":\"check\"}\n"]
+[3.183933,"o","Recovered rows:\n"]
+[3.255943,"o","{\"elapsed_us\": 723, \"truncated\": false, \"rows_affected\": 0, \"row_count\": 1, \"rows\": [[1753]], \"columns\": [{\"type\": \"BIGINT\", \"name\": \"COUNT(*)\"}], \"statement\": \"SELECT\", \"ok\": true}\n"]
+[3.300125,"o","Verified 1752 acknowledged writes; recovered 1753 rows.\n"]
+[3.503097,"o","Graceful stop exited 0 with drain and checkpoint logs.\n"]

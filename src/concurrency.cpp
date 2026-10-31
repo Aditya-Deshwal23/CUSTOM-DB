@@ -24,7 +24,10 @@ thread_local std::vector<HeldLock> held_locks;
 
 [[noreturn]] void AbortRankInversion(LockRank held, const void* held_lock, LockRank requested,
                                      const void* requested_lock) {
-    std::fprintf(stderr, "Lock-rank inversion: held rank %u at %p, requested rank %u at %p\n",
+    std::fprintf(stderr,
+                 "{\"level\":\"critical\",\"event\":\"lock_rank_inversion\","
+                 "\"held_rank\":%u,\"held_lock\":\"%p\",\"requested_rank\":%u,"
+                 "\"requested_lock\":\"%p\"}\n",
                  static_cast<unsigned>(held), held_lock, static_cast<unsigned>(requested),
                  requested_lock);
     std::abort();
@@ -68,7 +71,8 @@ void LockRankChecker::Released(const void* lock) noexcept {
     const auto found = std::find_if(held_locks.rbegin(), held_locks.rend(),
                                     [lock](const HeldLock& held) { return held.identity == lock; });
     if (found == held_locks.rend()) {
-        std::fprintf(stderr, "Lock-rank checker: unlocking an untracked lock\n");
+        std::fprintf(stderr,
+                     "{\"level\":\"critical\",\"event\":\"untracked_lock_unlock\"}\n");
         std::abort();
     }
     held_locks.erase(std::next(found).base());
@@ -82,7 +86,9 @@ void LockRankChecker::AssertNotHeld(LockRank rank) {
     const auto found = std::find_if(held_locks.begin(), held_locks.end(),
                                     [rank](const HeldLock& held) { return held.rank == rank; });
     if (found != held_locks.end()) {
-        std::fprintf(stderr, "Lock-rank checker: operation attempted while rank %u is held\n",
+        std::fprintf(stderr,
+                     "{\"level\":\"critical\",\"event\":\"forbidden_io_lock_held\","
+                     "\"rank\":%u}\n",
                      static_cast<unsigned>(rank));
         std::abort();
     }
@@ -94,7 +100,8 @@ void LockRankChecker::AssertNotHeld(LockRank rank) {
 void LockRankChecker::AssertNoLocksHeld() {
 #ifndef NDEBUG
     if (!held_locks.empty()) {
-        std::fprintf(stderr, "Lock-rank checker: thread exited with locks held\n");
+        std::fprintf(stderr,
+                     "{\"level\":\"critical\",\"event\":\"thread_exited_with_locks_held\"}\n");
         std::abort();
     }
 #endif

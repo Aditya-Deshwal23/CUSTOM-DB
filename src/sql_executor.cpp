@@ -1758,12 +1758,101 @@ bool ValuesEqual(const Value& left, const Value& right) {
     return comparison && *comparison == 0;
 }
 
-void ValidateTableRow(const CatalogTable& table, const Row& row) {
+void ValidateTableRow(const Catalog& catalog, const CatalogTable& table, const Row& row) {
     ValidateRow(table.schema, row);
     for (size_t column = 0; column < row.size(); ++column) {
         if (table.not_null[column] && IsNullValue(row[column])) {
             throw DbError(ErrorCode::NOT_NULL_VIOLATION,
                           "Column cannot be NULL: " + table.schema.columns[column].name);
+        }
+        const Column& definition = table.schema.columns[column];
+        if (!definition.references || IsNullValue(row[column])) {
+            continue;
+        }
+        const CatalogTable* referenced = catalog.FindTable(definition.references->table);
+        if (referenced == nullptr) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Foreign-key target is missing");
+        }
+        const auto referenced_column = std::find_if(
+            referenced->schema.columns.begin(), referenced->schema.columns.end(),
+            [&definition](const Column& candidate) {
+                return Canonical(candidate.name) == Canonical(definition.references->column);
+            });
+        if (referenced_column == referenced->schema.columns.end()) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Foreign-key target column is missing");
+        }
+        const size_t referenced_index =
+            static_cast<size_t>(referenced_column - referenced->schema.columns.begin());
+        const auto unique_index = std::find_if(
+            referenced->indexes.begin(), referenced->indexes.end(),
+            [referenced_index](const CatalogIndex& index) {
+                return index.column == referenced_index && index.unique;
+            });
+        bool reference_exists = false;
+        if (unique_index != referenced->indexes.end()) {
+            for (uint64_t packed_rid : FindIndexRids(*unique_index->tree, row[column])) {
+                const RID rid = RID::Unpack(packed_rid);
+                const std::optional<Tuple> tuple = referenced->heap->Get(rid);
+                if (!tuple) {
+                    throw DbError(ErrorCode::PAGE_CORRUPT,
+                                  "Foreign-key index references a missing row", rid.page_id);
+                }
+                const Row referenced_row = DeserializeTuple(referenced->schema, *tuple);
+                if (ValuesEqual(referenced_row[referenced_index], row[column])) {
+                    reference_exists = true;
+                    break;
+                }
+            }
+        }
+        if (!reference_exists) {
+            throw DbError(ErrorCode::FK_VIOLATION,
+                          "Foreign-key value does not exist in " + referenced->name + "." +
+                              referenced_column->name);
+        }
+    }
+}
+
+void CheckReferencedValues(const Catalog& catalog, const CatalogTable& table,
+                           const std::vector<Row>& old_rows,
+                           const std::vector<Row>* replacement_rows = nullptr) {
+    for (const auto& candidate : catalog.Tables()) {
+        const CatalogTable& child = *candidate;
+        for (size_t column_index = 0; column_index < child.schema.columns.size(); ++column_index) {
+            const Column& column = child.schema.columns[column_index];
+            if (!column.references || Canonical(column.references->table) != Canonical(table.name)) {
+                continue;
+            }
+            const auto target = std::find_if(
+                table.schema.columns.begin(), table.schema.columns.end(),
+                [&column](const Column& definition) {
+                    return Canonical(definition.name) == Canonical(column.references->column);
+                });
+            if (target == table.schema.columns.end()) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Foreign-key target column is missing");
+            }
+            const size_t target_index =
+                static_cast<size_t>(target - table.schema.columns.begin());
+            TableIterator iterator = child.heap->Begin();
+            RID rid{};
+            Tuple tuple;
+            while (iterator.Next(rid, tuple)) {
+                const Row child_row = DeserializeTuple(child.schema, tuple);
+                if (IsNullValue(child_row[column_index])) {
+                    continue;
+                }
+                for (size_t row_index = 0; row_index < old_rows.size(); ++row_index) {
+                    if (replacement_rows != nullptr &&
+                        ValuesEqual(old_rows[row_index][target_index],
+                                    (*replacement_rows)[row_index][target_index])) {
+                        continue;
+                    }
+                    if (ValuesEqual(old_rows[row_index][target_index], child_row[column_index])) {
+                        throw DbError(ErrorCode::FK_VIOLATION,
+                                      "Cannot modify a referenced value in " + table.name + "." +
+                                          target->name);
+                    }
+                }
+            }
         }
     }
 }
@@ -1837,7 +1926,7 @@ class Insert final : public VolcanoOperator {
             if (context_.cancel != nullptr) {
                 context_.cancel->Check();
             }
-            ValidateTableRow(table_, row);
+            ValidateTableRow(*context_.catalog, table_, row);
             CheckUniqueValues(table_, row, {});
             const Tuple tuple = SerializeTuple(table_.schema, row);
             const RID rid = table_.heap->Insert(tuple);
@@ -1908,7 +1997,7 @@ class Update final : public VolcanoOperator {
                 updated[assignment.column] = CoerceValue(assignment.expression->Eval(original),
                                                          table_.schema.columns[assignment.column]);
             }
-            ValidateTableRow(table_, updated);
+            ValidateTableRow(*context_.catalog, table_, updated);
             pending.emplace_back(rid, std::move(updated));
         }
 
@@ -1933,7 +2022,9 @@ class Update final : public VolcanoOperator {
         }
 
         std::vector<Row> old_rows;
+        std::vector<Row> replacement_rows;
         old_rows.reserve(pending.size());
+        replacement_rows.reserve(pending.size());
         for (const auto& entry : pending) {
             const std::optional<Tuple> tuple_before = table_.heap->Get(entry.first);
             if (!tuple_before) {
@@ -1941,7 +2032,9 @@ class Update final : public VolcanoOperator {
                               entry.first.page_id);
             }
             old_rows.push_back(DeserializeTuple(table_.schema, *tuple_before));
+            replacement_rows.push_back(entry.second);
         }
+        CheckReferencedValues(*context_.catalog, table_, old_rows, &replacement_rows);
         for (size_t index = 0; index < pending.size(); ++index) {
             RemoveIndexEntries(table_, old_rows[index], pending[index].first);
         }
@@ -2008,6 +2101,12 @@ class Delete final : public VolcanoOperator {
             }
             pending.emplace_back(rid, DeserializeTuple(table_.schema, tuple));
         }
+        std::vector<Row> old_rows;
+        old_rows.reserve(pending.size());
+        for (const auto& entry : pending) {
+            old_rows.push_back(entry.second);
+        }
+        CheckReferencedValues(*context_.catalog, table_, old_rows);
         for (const auto& entry : pending) {
             RemoveIndexEntries(table_, entry.second, entry.first);
         }
@@ -2146,8 +2245,35 @@ void CreateTable(Catalog& catalog, const SqlStatement& statement) {
             } else if (constraint == SqlConstraintKind::UNIQUE) {
                 unique_columns.push_back(schema.columns.size() - 1U);
             } else if (constraint == SqlConstraintKind::REFERENCES) {
-                throw DbError(ErrorCode::FK_VIOLATION,
-                              "Foreign-key constraints are not implemented");
+                const CatalogTable* referenced = catalog.FindTable(definition.referenced_table);
+                if (referenced == nullptr) {
+                    throw DbError(ErrorCode::UNKNOWN_TABLE,
+                                  "Unknown foreign-key target table: " +
+                                      std::string(definition.referenced_table));
+                }
+                const auto referenced_column = std::find_if(
+                    referenced->schema.columns.begin(), referenced->schema.columns.end(),
+                    [&definition](const Column& candidate) {
+                        return Canonical(candidate.name) == Canonical(definition.referenced_column);
+                    });
+                if (referenced_column == referenced->schema.columns.end()) {
+                    throw DbError(ErrorCode::UNKNOWN_COLUMN,
+                                  "Unknown foreign-key target column: " +
+                                      std::string(definition.referenced_column));
+                }
+                const size_t referenced_index =
+                    static_cast<size_t>(referenced_column - referenced->schema.columns.begin());
+                const bool unique = std::any_of(
+                    referenced->indexes.begin(), referenced->indexes.end(),
+                    [referenced_index](const CatalogIndex& index) {
+                        return index.column == referenced_index && index.unique;
+                    });
+                if (!unique || referenced_column->type != type) {
+                    throw DbError(ErrorCode::FK_VIOLATION,
+                                  "Foreign-key target must be a unique column of matching type");
+                }
+                schema.columns.back().references =
+                    ColumnReference{referenced->name, referenced_column->name};
             }
         }
         not_null.push_back(column_not_null);

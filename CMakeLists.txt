@@ -80,6 +80,7 @@ endif()
 find_package(Threads REQUIRED)
 
 add_library(reldb_core STATIC
+  src/config.cpp
   src/metrics/metrics.cpp
   src/crc32c.cpp
   src/disk_manager.cpp
@@ -129,6 +130,7 @@ target_compile_definitions(relational_db PRIVATE
   ASIO_STANDALONE
   RELDB_GIT_SHA="${RELDB_GIT_SHA}"
   RELDB_BUILD_TIME="${RELDB_BUILD_TIME}"
+  CUSTOMRELATIONALDB_VERSION="${PROJECT_VERSION}"
 )
 target_link_libraries(relational_db PRIVATE reldb_core Threads::Threads)
 if(WIN32)

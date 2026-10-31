@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <string>
 
 #include "clock_replacer.h"
 #include "concurrency.h"
@@ -61,6 +62,8 @@ class BufferPoolManager {
    public:
     explicit BufferPoolManager(std::shared_ptr<IDiskManager> disk_manager);
     BufferPoolManager(size_t pool_size, std::shared_ptr<IDiskManager> disk_manager);
+    BufferPoolManager(size_t pool_size, std::shared_ptr<IDiskManager> disk_manager,
+                      const std::string& replacement_policy);
     ~BufferPoolManager();
 
     BufferPoolManager(const BufferPoolManager&) = delete;
@@ -117,8 +120,6 @@ class BufferPoolManager {
     void RecordFreePageState(page_id_t page_id, bool will_be_free);
     bool HasActiveTransaction() const;
     void FlushFrame(Frame* frame);
-    static size_t ConfiguredPoolSize();
-
     std::vector<Frame> frames_;
     std::shared_ptr<IDiskManager> disk_manager_;
     std::unique_ptr<Replacer> replacer_;

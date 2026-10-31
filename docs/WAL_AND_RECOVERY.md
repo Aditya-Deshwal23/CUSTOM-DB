@@ -1,6 +1,6 @@
 # WAL and recovery
 
-The WAL is `<DB_PATH>-wal`; its byte layout is specified in
+The WAL defaults to `<DB_PATH>-wal` and can be relocated with `WAL_PATH`; its byte layout is specified in
 [FILE_FORMAT.md](./FILE_FORMAT.md). A statement is an auto-commit transaction.
 Its first write-guard touch snapshots the page's body, type, flags, LSN, and
 dirty bit. A failed statement restores those images and page-allocation
@@ -61,12 +61,13 @@ PAGE_IMAGE records run for each image in the commit batch.
 `Executor::IntegrityCheck()` reads every logical page through the disk/buffer
 manager (thereby checking physical page checksums), runs
 `BPlusTree::Validate()`, and verifies that heap rows and index RIDs agree in
-both directions. The later CLI `--check` option is intentionally not part of
-this phase.
+both directions. The `--check` one-off command runs this check after startup
+recovery and exits nonzero when an integrity issue is found.
 
 ## Verification
 
 The WAL regressions cover clean restart, rollback of touched and newly
-allocated pages, and append-after-torn-tail recovery. Linux CI runs the
-hard-kill crash harness; details and iteration counts are recorded in
-[CLAIMS.md](./CLAIMS.md).
+allocated pages, append-after-torn-tail recovery, and interrupted recovery.
+Linux CI runs the hard-kill crash harness (200 iterations per push/PR and
+5,000 nightly); the Docker proof and its recording are linked from
+[DEMO.md](./DEMO.md). Evidence is indexed in [CLAIMS.md](./CLAIMS.md).

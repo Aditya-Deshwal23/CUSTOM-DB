@@ -1,4 +1,34 @@
-# Disk benchmark baseline
+# Benchmarks
+
+## Headline comparison with SQLite
+
+`tools/benchmark_sqlite.py` creates the same 10,000-row primary-key table in a
+temporary CUSTOM-DB file and a temporary SQLite file, populates both outside
+the timed interval, then runs the same deterministic warm point-read keys.
+Each run measures 1,000 reads; five runs use seeds 1337–1341. Setup is excluded.
+The CUSTOM-DB request goes through Crow, HTTP, JSON, parsing, planning, and the
+engine; SQLite uses Python's in-process `sqlite3` interface. This is a useful
+user-facing path comparison, **not an apples-to-apples engine-core benchmark**.
+It includes CUSTOM-DB's server and serialization overhead.
+
+Observed on 2026-10-31, Apple M5 (`arm64`), macOS 27.0.1, Python 3.14.7,
+SQLite 3.53.4, Release CUSTOM-DB build:
+
+| Implementation / path | Median throughput | Median p50 | Median p95 |
+|---|---:|---:|---:|
+| CUSTOM-DB, HTTP + JSON | 6,000 reads/s | 158.0 us | 207.7 us |
+| SQLite, Python `sqlite3` | 671,366 reads/s | 1.38 us | 1.67 us |
+
+Reproduce the exact workload and print per-run results:
+
+```sh
+python3 tools/benchmark_sqlite.py --binary build-release/relational_db \
+  --rows 10000 --iterations 1000 --repetitions 5 --seed 1337
+```
+
+The seed, database type, host, SQLite and Python versions, warm-cache
+condition, and per-run statistics are included in the output. These local
+measurements are not performance guarantees or CI thresholds.
 
 `bench/bench_disk.cpp` measures sequential/random 4 KiB page reads and writes
 plus `Sync()` latency. Read/write benchmarks operate on a 256-page file in the

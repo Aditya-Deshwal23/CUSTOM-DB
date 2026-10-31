@@ -1,59 +1,107 @@
-# Engineering Post-Mortem: Technical Challenges in Custom Relational DB Development
+# Engineering post-mortem
 
-This document serves as a high-level technical retrospective for the development of the Custom Relational Database Engine and its associated Web Dashboard. It focuses exclusively on the non-trivial architectural and environmental obstacles encountered during implementation.
+This is a regression-focused account of defects found while building the
+storage engine. Each item names the observable failure and the test that now
+guards it; tests are evidence that the regression is covered, not proof that no
+related defects remain.
 
----
+## 1. Guard pin leak caused false misses under eviction
 
-### 1. C++ Macro Pollution & Crow/ASIO Compilation Failures (Exit Code 2)
+**Symptom and discovery.** With a small buffer pool and enough B+ tree inserts
+to split/evict pages, lookups could report absent keys even though the tree
+contained them. The investigation found page pins surviving beyond the
+operation's intended scope: leaked pins reduced the frames available for
+replacement and left traversal with incomplete access under pressure.
 
-**The Difficulty:**
-During the integration of the Crow HTTP framework and the ASIO networking library, the compiler (GCC/MinGW) repeatedly exited with `Exit Code 2`. The errors were cryptic, referencing internal ASIO types and `TryAcquireSRWLockExclusive` syntax failures.
+**Correction.** Page guards now own their pins and frame latches through RAII;
+move transfers ownership, and scope exit releases it. B+ tree operations avoid
+retaining page guards while fetching unrelated pages.
 
-Investigation revealed that a legacy polyfill header, `dummy_mutex.h`, contained global macros:
-```cpp
-#define mutex std::mutex
-#define shared_mutex std::shared_mutex
-```
-These macros leaked into the header-only Crow and ASIO libraries. Because these libraries use their own internal synchronization primitives and sometimes conditionally define their own mutex wrappers, the macro expansion corrupted the library source code, leading to massive redeclaration and syntax errors.
+**Regression coverage.** `BufferPoolGuardTest.GuardsOwnPinsAndMoveWithoutLeaking`
+and `BPlusTreeTest.LookupsNeverFalseMissAfterManyInserts` cover guard ownership
+and repeated lookups through eviction in
+[buffer_pool_test.cpp](tests/buffer_pool_test.cpp) and
+[known_bugs_test.cpp](tests/regression/known_bugs_test.cpp).
 
-**The Resolution:**
-The `dummy_mutex.h` file was gutted of all `#define` macros. The core database engine (Buffer Pool Manager, B+ Tree Index, and Page Latch system) was refactored to use explicit C++17 native types:
-- Transitioned all `mutex` references to `std::mutex`.
-- Upgraded the concurrency model to use `std::shared_mutex` for Read-Write locking (shared/exclusive access) across the Buffer Pool and B+ Tree root.
-- Resulted in a clean compilation of the Crow framework without namespace pollution.
+## 2. A split leaf linked to itself
 
-### 2. Cross-Origin Resource Sharing (CORS) & Port Mismatches
+**Symptom and discovery.** A range scan could fail to terminate after a leaf
+split because a new leaf's next-page link pointed to itself instead of the
+former successor. The search path could still find point keys, so a range scan
+after a split was needed to expose the cycle.
 
-**The Difficulty:**
-The "Living Dashboard" was hosted via a VS Code Live Server (typically ports 5500 or 5501), while the C++ Database Engine served its API on port 8080. Browser security policies initially blocked all telemetry requests due to CORS (Cross-Origin Resource Sharing) violations. Fetch requests were failing silently or returning `403 Forbidden` on preflight `OPTIONS` requests.
+**Correction.** Split code preserves the old successor on the new right leaf
+and links the left leaf to that new page. Structural validation checks leaf
+ordering and linkage.
 
-**The Resolution:**
-- **Backend:** Integrated the `crow::CORSHandler` middleware into the `ApiServer`. Configured it to explicitly allow the dashboard's origins and permit both `GET` and `POST` methods.
-- **Frontend:** Implemented a dynamic `API_BASE_URL` detector in `index.js` that checks `window.location.port`. If the frontend is running on standard dev ports (5500/5501), it automatically targets the absolute URL `http://127.0.0.1:8080`; otherwise, it uses relative paths for production deployment.
+**Regression coverage.** `BPlusTreeTest.RangeScanTerminatesAfterSplit` checks
+completion and returned rows after splitting in
+[known_bugs_test.cpp](tests/regression/known_bugs_test.cpp); seeded oracle and
+range tests are also in [b_plus_tree_test.cpp](tests/b_plus_tree_test.cpp).
 
-### 3. Windows Smart App Control Execution Blocks (0x800711C7)
+## 3. Appending behind a torn WAL tail hid later commits
 
-**The Difficulty:**
-Developing a systems-level application on Windows 11 triggered aggressive OS security hurdles. Locally compiled binaries (`relational_db.exe`) were frequently blocked by **Smart App Control** or **Windows Defender** with error `0x800711C7`. Because the binary was unsigned and performed low-level disk I/O and networking, it was flagged as a potential threat.
+**Symptom and discovery.** Recovery correctly stopped at a short or
+CRC-invalid record, but leaving the invalid bytes in place meant a later
+append would sit beyond the first invalid record. The next recovery would
+stop at the old tail and never reach the new commit.
 
-**The Resolution:**
-- Documented the requirement to add the `build/` and `build_cli/` directories to Windows Security exclusion lists.
-- Manually unblocked the specific executable in File Properties to bypass the digital signature requirement during the iterative development cycle.
+**Correction.** Recovery truncates/replaces the WAL to a valid header only
+after replay and database sync succeed, so the next transaction appends to a
+valid stream. Replaying full-page images remains idempotent if recovery is
+interrupted.
 
-### 4. Frontend Scroll Traps & D3.js Event Hijacking
+**Regression coverage.** `WalTest.RecordAppendedAfterTornTailIsRecoverable`
+and `WalTest.RecoveryCanBeInterruptedAndRetried` cover append-after-tail and
+recovery retry in [known_bugs_test.cpp](tests/regression/known_bugs_test.cpp).
 
-**The Difficulty:**
-The "Immersive Engine Cockpit" initially suffered from a "Scroll Trap" bug. To create a full-screen feel, the layout used `height: 100vh` and `overflow: hidden`. However, the **Relational Schema Topology** (built with SVG/D3 logic) had active zoom/pan event listeners that intercepted the mouse wheel. This prevented the user from scrolling down to see the SQL Console or the Buffer Pool Heatmap, effectively trapping them at the top of the page.
+## 4. Reader preference could starve statement writers
 
-**The Resolution:**
-- **CSS:** Refactored the global layout to use `min-height: 100vh` and `overflow-y: auto`, allowing the document to grow naturally.
-- **JavaScript:** Completely disabled the D3/Canvas-style zoom and pan listeners within `initPanZoom()`. Hardcoded the Schema Atlas to a fixed height of 450px with a static viewport scale to ensure visibility without hijacking user input.
+**Symptom and discovery.** A generic shared mutex does not promise that a
+waiting exclusive writer will beat a continuous stream of new shared readers.
+The concurrency contract requires bounded admission, so unbounded writer
+wait was unacceptable.
 
-### 5. State Management Between Live & Simulation Modes
+**Correction.** The executor uses a writer-preferring gate: once a writer is
+queued, later readers wait. Queue and admission bounds return typed `BUSY`
+errors rather than allowing unbounded growth.
 
-**The Difficulty:**
-A critical requirement was for the dashboard to function as a standalone portfolio piece even when the C++ backend was offline. This created a complex state management problem: switching between "Live" and "Simulation" modes often led to "Ghost Timers"—where multiple `setInterval` calls were updating the UI simultaneously, causing flickering metrics and duplicated animations.
+**Regression coverage.** `ConcurrencyTest.WriterPreferringGateBoundsWriterWait`
+keeps eight readers acquiring repeatedly and checks the writer completes;
+`ConcurrencyTest.GateTimeoutAndQueueOverflowReturnBusy` verifies overload
+behavior in [sql_execution_test.cpp](tests/sql_execution_test.cpp).
 
-**The Resolution:**
-- Implemented a robust `toggleMode()` function in `index.js` that uses strict `clearInterval` logic to kill previous telemetry loops before starting new ones.
-- Wrapped the telemetry update logic in a `try/catch` block. If the Live Engine becomes unreachable, the system triggers an alert and automatically failsafe-reverts to Simulation Mode, preserving the UX integrity without requiring a page refresh.
+## 5. TSan exposed races hidden by functional tests
+
+**Symptom and discovery.** Sequential tests could not exercise overlapping
+access among the periodic WAL sync worker, SQL readers/writers, page I/O, and
+request middleware. ThreadSanitizer runs and seeded stress tests exposed
+shared-state and lifetime boundaries that needed explicit synchronization.
+The resulting coverage is split by concurrent component instead of relying on
+one broad test.
+
+**Correction.** The final design documents a ranked lock order, keeps disk/WAL
+I/O outside the buffer-pool page-table mutex, uses atomics or narrowly scoped
+locks for metrics and middleware counters, and keeps statement admission
+separate from page-frame synchronization. See
+[CONCURRENCY.md](docs/CONCURRENCY.md).
+
+**Regression coverage.** CI runs `WalTest.NormalModeSyncThreadTsanClean`,
+`ConcurrencyTest.ReaderWriterTsanClean`,
+`ConcurrencyTest.ExecutorStatementGateTsanClean`,
+`ConcurrencyTest.SqlExecutorStatementGateTsanStress`, and
+`DiskManagerTest.ConcurrentDistinctPageIo` under TSan; API middleware also
+receives concurrent seeded input. Test implementations are in
+[known_bugs_test.cpp](tests/regression/known_bugs_test.cpp),
+[sql_execution_test.cpp](tests/sql_execution_test.cpp), and
+[disk_manager_test.cpp](tests/disk_manager_test.cpp); CI wiring is in
+[ci.yml](.github/workflows/ci.yml).
+
+## What this changed about the project
+
+The recurring lesson was to test invariants at their ownership boundaries:
+pins at guard destruction, leaf links after structural changes, WAL append
+after invalid tails, writer progress under arrival pressure, and shared state
+under actual concurrent execution. The evidence index is
+[docs/CLAIMS.md](docs/CLAIMS.md); supported behavior and explicit omissions
+are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).

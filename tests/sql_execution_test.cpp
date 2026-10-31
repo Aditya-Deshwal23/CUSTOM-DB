@@ -217,7 +217,7 @@ TEST(ConcurrencyTest, LockRankCheckerAbortsOnInversion) {
             std::lock_guard<RankedMutex> frame_guard(frame_lock);
             std::lock_guard<RankedMutex> pool_guard(buffer_pool_lock);
         },
-        "Lock-rank inversion");
+        "lock_rank_inversion");
 #endif
 }
 
@@ -229,7 +229,7 @@ TEST(ConcurrencyTest, LockRankCheckerRejectsIoUnderBufferPoolMutex) {
             std::lock_guard<RankedMutex> pool_guard(buffer_pool_lock);
             LockRankChecker::AssertNotHeld(LockRank::BUFFER_POOL);
         },
-        "operation attempted while rank");
+        "forbidden_io_lock_held");
 #endif
 }
 

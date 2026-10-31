@@ -15,9 +15,11 @@ The gate prefers waiting writers over new readers. Admission is bounded to 64
 active statements and 128 queued statements by default. Waiting longer than
 `STATEMENT_GATE_TIMEOUT_MS` (1,000 ms) or exceeding the queue returns
 `DbError{BUSY, ...}`. The HTTP API maps `BUSY` to 503 and sends
-`Retry-After: 1`. The cooperative statement deadline is
-`STATEMENT_TIMEOUT_MS` (5,000 ms); executor loops check its cancellation token
-and report `QUERY_TIMEOUT`.
+`Retry-After: 1`. The HTTP API's cooperative statement deadline is
+`STATEMENT_TIMEOUT_MS` (2,000 ms by default; configurable up to 600,000 ms).
+Low-level `StatementScope` callers default to the 5,000 ms compile-time
+constant. Executor loops check the cancellation token and report
+`QUERY_TIMEOUT`.
 
 Every write appends its page images and COMMIT record to the WAL and syncs the
 WAL before returning, regardless of the configured background-sync mode. The
@@ -47,6 +49,10 @@ The HTTP API's per-IP token buckets use a separate mutex only while updating
 the bounded in-memory bucket map. Middleware releases it before route handlers
 can enter the statement gate or perform storage I/O. HTTP counters and server
 readiness flags are atomics; no API mutex is nested with the storage lock order.
+The middleware's active-request drain counter is atomic; its condition-variable
+mutex is used only while waiting for zero active handlers and is released before
+the server is stopped or storage is checkpointed. New work receives 503 once
+draining begins.
 
 Metrics use fixed-label arrays and relaxed atomic counters/gauges/histogram
 buckets. Recording does not allocate or acquire a registry-wide mutex; a scrape

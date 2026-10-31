@@ -83,6 +83,8 @@ class WriteAheadLog {
     explicit WriteAheadLog(const std::string& database_path);
     WriteAheadLog(const std::string& database_path, DurabilityMode mode,
                   uint64_t sync_interval_ms = 1000, uint64_t max_bytes = 16U * 1024U * 1024U);
+    WriteAheadLog(const std::string& database_path, const std::string& wal_path,
+                  DurabilityMode mode, uint64_t sync_interval_ms, uint64_t max_bytes);
     ~WriteAheadLog();
 
     WriteAheadLog(const WriteAheadLog&) = delete;

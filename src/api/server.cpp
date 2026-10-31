@@ -9,11 +9,11 @@ namespace relational_db {
 
 ApiServer::Impl::Impl(std::shared_ptr<BufferPoolManager> buffer_pool,
                       std::shared_ptr<IDiskManager> disk, std::shared_ptr<Executor> query_executor,
-                      std::string static_path)
+                      std::string static_path, Config service_config)
     : bpm(std::move(buffer_pool)),
       disk_manager(std::move(disk)),
       executor(std::move(query_executor)),
-      config(LoadApiConfig()) {
+      config(std::move(service_config)) {
     if (!bpm || !disk_manager || !executor) {
         throw std::invalid_argument("ApiServer dependencies must not be null");
     }
@@ -46,14 +46,23 @@ ApiServer::Impl::Impl(std::shared_ptr<BufferPoolManager> buffer_pool,
 
 ApiServer::ApiServer(std::shared_ptr<BufferPoolManager> bpm,
                      std::shared_ptr<IDiskManager> disk_manager, std::shared_ptr<Executor> executor,
-                     std::string dashboard_path)
+                     std::string dashboard_path, Config config)
     : impl_(std::make_unique<Impl>(std::move(bpm), std::move(disk_manager), std::move(executor),
-                                   std::move(dashboard_path))) {}
+                                   std::move(dashboard_path), std::move(config))) {}
 
 ApiServer::~ApiServer() = default;
 
 void ApiServer::Run(int port) {
     impl_->app.bindaddr("0.0.0.0").port(port).multithreaded().run();
+}
+
+void ApiServer::BeginDrain() {
+    impl_->draining.store(true, std::memory_order_release);
+    impl_->app.get_middleware<ApiMiddleware>().draining.store(true, std::memory_order_release);
+}
+
+bool ApiServer::WaitForDrain(std::chrono::milliseconds timeout) {
+    return impl_->app.get_middleware<ApiMiddleware>().WaitForIdle(timeout);
 }
 
 void ApiServer::Stop() {

@@ -2,13 +2,11 @@
 
 #include <algorithm>
 #include <array>
-#include <charconv>
-#include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <string>
 
 #include "db_error.h"
+#include "logging.h"
 #include "page_allocator.h"
 
 namespace relational_db {
@@ -51,32 +49,14 @@ size_t ValidatePoolSize(size_t pool_size) {
 
 }  // namespace
 
-size_t BufferPoolManager::ConfiguredPoolSize() {
-    constexpr size_t kDefaultFrames = 4096;
-    const char* configured = std::getenv("BUFFER_POOL_FRAMES");
-    if (configured == nullptr || *configured == '\0') {
-        return kDefaultFrames;
-    }
-
-    size_t frames = 0;
-    const char* end = configured;
-    while (*end != '\0') {
-        ++end;
-    }
-    const auto parsed = std::from_chars(configured, end, frames);
-    if (parsed.ec != std::errc{} || parsed.ptr != end || frames < 16 ||
-        frames > static_cast<size_t>(std::numeric_limits<frame_id_t>::max())) {
-        throw DbError(ErrorCode::INVALID_ARGUMENT,
-                      "BUFFER_POOL_FRAMES must be an integer between 16 and " +
-                          std::to_string(std::numeric_limits<frame_id_t>::max()));
-    }
-    return frames;
-}
-
 BufferPoolManager::BufferPoolManager(std::shared_ptr<IDiskManager> disk_manager)
-    : BufferPoolManager(ConfiguredPoolSize(), std::move(disk_manager)) {}
+    : BufferPoolManager(4096, std::move(disk_manager), "lruk") {}
 
 BufferPoolManager::BufferPoolManager(size_t pool_size, std::shared_ptr<IDiskManager> disk_manager)
+    : BufferPoolManager(pool_size, std::move(disk_manager), "lruk") {}
+
+BufferPoolManager::BufferPoolManager(size_t pool_size, std::shared_ptr<IDiskManager> disk_manager,
+                                     const std::string& replacement_policy)
     : frames_(ValidatePoolSize(pool_size)),
       disk_manager_(std::move(disk_manager)),
       write_back_policy_(std::make_shared<TransactionAwareWriteBackPolicy>(
@@ -85,11 +65,9 @@ BufferPoolManager::BufferPoolManager(size_t pool_size, std::shared_ptr<IDiskMana
         throw DbError(ErrorCode::INVALID_ARGUMENT, "Buffer pool requires a disk manager");
     }
 
-    const char* policy = std::getenv("BUFFER_POOL_POLICY");
-    const std::string policy_name = policy == nullptr ? "lruk" : policy;
-    if (policy_name == "clock") {
+    if (replacement_policy == "clock") {
         replacer_ = std::make_unique<ClockReplacer>(pool_size);
-    } else if (policy_name == "lruk") {
+    } else if (replacement_policy == "lruk") {
         replacer_ = std::make_unique<LruKReplacer>(pool_size, 2);
     } else {
         throw DbError(ErrorCode::INVALID_ARGUMENT,
@@ -110,7 +88,7 @@ BufferPoolManager::~BufferPoolManager() {
     try {
         FlushAll();
     } catch (const std::exception& error) {
-        std::cerr << "BufferPoolManager shutdown flush failed: " << error.what() << '\n';
+        LogMessage("error", "buffer_pool_shutdown_flush_failed", error.what());
     }
 }
 

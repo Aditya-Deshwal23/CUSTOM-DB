@@ -1,9 +1,9 @@
 #include "demo/load_generator.h"
 
 #include <chrono>
-#include <iostream>
 #include <string>
 
+#include "logging.h"
 #include "metrics/metrics.h"
 
 namespace relational_db {
@@ -30,7 +30,7 @@ void DemoLoadGenerator::Run() {
         try {
             (void)executor_.ExecuteQuery("SELECT " + std::to_string(key));
         } catch (const std::exception& error) {
-            std::cerr << "DEMO_LOAD statement failed: " << error.what() << '\n';
+            LogMessage("error", "demo_load_statement_failed", error.what());
         }
         ++sequence;
         std::unique_lock<std::mutex> lock(wait_mutex_);

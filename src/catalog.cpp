@@ -12,7 +12,7 @@
 namespace relational_db {
 namespace {
 
-constexpr uint32_t kCatalogVersion = 1;
+constexpr uint32_t kCatalogVersion = 2;
 constexpr size_t kCatalogPointerOffset = sizeof(bpt_detail::IndexMetaLayout) + sizeof(page_id_t);
 constexpr size_t kCatalogHeaderSize = 6;
 using BytePage = std::array<char, PAGE_DATA_SIZE>;
@@ -239,6 +239,21 @@ void Catalog::DropTable(std::string_view name) {
     if (found == tables_.end()) {
         throw DbError(ErrorCode::INVALID_ARGUMENT, "Unknown table: " + std::string(name));
     }
+    for (const auto& table : tables_) {
+        if (table == *found) {
+            continue;
+        }
+        const bool referenced = std::any_of(
+            table->schema.columns.begin(), table->schema.columns.end(),
+            [&canonical](const Column& column) {
+                return column.references &&
+                       CanonicalName(column.references->table) == canonical;
+            });
+        if (referenced) {
+            throw DbError(ErrorCode::FK_VIOLATION,
+                          "Cannot drop table referenced by " + table->name);
+        }
+    }
     for (CatalogIndex& index : (*found)->indexes) {
         index.tree->Drop();
     }
@@ -276,7 +291,8 @@ void Catalog::Load(page_id_t catalog_page_id) {
     std::memcpy(catalog_bytes.data(), body->data(), body->size());
     guard.Drop();
     Reader reader(catalog_bytes.data(), catalog_bytes.size());
-    if (reader.U32() != kCatalogVersion) {
+    const uint32_t version = reader.U32();
+    if (version == 0U || version > kCatalogVersion) {
         throw DbError(ErrorCode::UNSUPPORTED_VERSION, "Unsupported catalog version",
                       catalog_page_id);
     }
@@ -301,6 +317,9 @@ void Catalog::Load(page_id_t catalog_page_id) {
             column.type = static_cast<ColumnType>(type);
             column.varchar_length = reader.U16();
             table->not_null.push_back(reader.U8() != 0);
+            if (version >= 2U && reader.U8() != 0U) {
+                column.references = ColumnReference{reader.String(), reader.String()};
+            }
             table->schema.columns.push_back(std::move(column));
         }
         if (primary_key != UINT16_MAX) {
@@ -355,6 +374,11 @@ void Catalog::Persist() {
             writer.U8(static_cast<uint8_t>(column.type));
             writer.U16(column.varchar_length);
             writer.U8(table->not_null[column_index] ? 1U : 0U);
+            writer.U8(column.references ? 1U : 0U);
+            if (column.references) {
+                writer.String(column.references->table);
+                writer.String(column.references->column);
+            }
         }
         writer.U16(static_cast<uint16_t>(table->indexes.size()));
         for (const CatalogIndex& index : table->indexes) {

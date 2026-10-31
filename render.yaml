@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: custom-db-engine
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /readyz
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: DB_PATH
+        value: /data/custom.db
+      - key: WAL_PATH
+        value: ""
+      - key: BUFFER_POOL_FRAMES
+        value: "4096"
+      - key: BUFFER_POOL_POLICY
+        value: lruk
+      - key: DURABILITY
+        value: full
+      - key: WAL_MAX_BYTES
+        value: "16777216"
+      - key: WAL_SYNC_INTERVAL_MS
+        value: "1000"
+      - key: READ_ONLY
+        value: "1"
+      - key: API_KEY
+        value: ""
+      - key: CORS_ORIGINS
+        value: ""
+      - key: MAX_BODY_BYTES
+        value: "65536"
+      - key: MAX_SQL_BYTES
+        value: "16384"
+      - key: MAX_RESULT_ROWS
+        value: "1000"
+      - key: STATEMENT_TIMEOUT_MS
+        value: "2000"
+      - key: RATE_LIMIT_RPS
+        value: "20"
+      - key: RATE_LIMIT_BURST
+        value: "40"
+      - key: MAX_DB_BYTES
+        value: "0"
+      - key: LOG_LEVEL
+        value: info
+      - key: DEMO_LOAD
+        value: "0"
+      - key: SLOW_QUERY_MS
+        value: "0"
+      - key: DRAIN_TIMEOUT_MS
+        value: "5000"
+      - key: ALLOW_UNSAFE
+        value: "0"
+    # Persistent Render disks require a paid instance.
+    # disks:
+    #   - name: custom-db-data
+    #     mountPath: /data

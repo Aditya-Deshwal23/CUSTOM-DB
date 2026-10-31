@@ -1,122 +1,157 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Database Observability Console</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#05070a">
+    <title>StorageEngine Observability</title>
     <link rel="stylesheet" href="index.css">
+    <script src="index.js" defer></script>
 </head>
 <body>
     <div class="app-container">
-        <header>
-            <div class="brand">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="primary"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                <h1>StorageEngine v1.0</h1>
-            </div>
+        <header class="app-header">
+            <a class="brand" href="/" aria-label="StorageEngine dashboard home">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                </svg>
+                <h1>StorageEngine</h1>
+            </a>
             <div class="status-container">
-                <div class="status-badge" id="mainStatusBadge">
+                <div id="mainStatusBadge" class="status-badge" role="status" aria-live="polite">
                     <span id="statusDot" class="status-dot"></span>
-                    <span id="statusText">INITIALIZING...</span>
+                    <span id="statusText">Connecting to engine…</span>
                 </div>
-                <button id="modeToggleBtn" class="mode-toggle">SWITCH TO LIVE ENGINE</button>
+                <button id="retryButton" class="button button-secondary" type="button" hidden>
+                    Retry now
+                </button>
             </div>
         </header>
 
-        <div id="simulationRibbon" class="simulated-ribbon" role="status">
-            SIMULATED DATA - not from the engine
+        <div id="liveRibbon" class="source-ribbon" role="status">
+            LIVE — waiting for engine metadata
         </div>
-
-        <section class="telemetry-ribbon">
-            <div class="metric-card">
-                <span class="metric-label">Cache Hit Rate (workload)</span>
-                <span class="metric-value" id="cacheHitRate">—</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">Query Throughput (workload)</span>
-                <span class="metric-value" id="queryThroughput">—</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">Average Query Latency (workload)</span>
-                <span class="metric-value" id="avgLatency">—</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">Workload Errors</span>
-                <span class="metric-value" id="errorCount">—</span>
-            </div>
+        <div id="replayRibbon" class="source-ribbon replay-ribbon" role="status" hidden></div>
+        <section id="offlineState" class="offline-state" role="alert" aria-live="assertive" hidden>
+            <h2 id="offlineTitle">Engine unavailable</h2>
+            <p id="offlineMessage">No engine values are being displayed.</p>
         </section>
 
         <main class="dashboard-grid">
-            <section class="panel" id="queryConsolePanel">
-                <div class="panel-header">
-                    <h2>SQL Execution Console</h2>
-                </div>
-                <div class="console-container">
-                    <span class="prompt">db-engine></span>
-                    <input type="text" id="sqlInput" class="console-input" placeholder="Enter INSERT 42 100 or SELECT 42..." spellcheck="false" autocomplete="off">
-                </div>
-                <div class="panel-content" id="queryLogContainer" style="padding: 0; overflow-y: auto; height: 400px;">
-                    <table style="width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.8125rem;">
-                        <thead style="position: sticky; top: 0; background: var(--surface); box-shadow: 0 1px var(--border); z-index: 10;">
-                            <tr>
-                                <th style="text-align: left; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500; width: 100px;">Timestamp</th>
-                                <th style="text-align: left; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500; width: 200px;">Command</th>
-                                <th style="text-align: left; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500;">Execution Trace</th>
-                                <th style="text-align: right; padding: 0.75rem 1rem; color: var(--muted); font-weight: 500; width: 80px;">Latency</th>
-                            </tr>
-                        </thead>
-                        <tbody id="queryLogBody">
-                            <!-- Rows prepended here -->
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section class="panel" id="bufferPoolPanel">
-                <div class="panel-header">
-                    <h2>Storage & Buffer Subsystem</h2>
-                    <span style="font-size: 0.75rem; color: var(--muted);">Illustrative buffer activity</span>
-                </div>
-                
-                <div class="panel-content" id="bufferPoolHeatmap" style="display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; padding: 1rem; align-content: start;">
-                    <!-- 50 Frames injected by JS -->
-                </div>
-
-                <!-- Compact Shape-Based Execution Pipeline -->
-                <div class="compact-pipeline">
-                    <div class="pipe-node hexagon" id="pipe-parser" title="SQL Parser"><span>PARSER</span></div>
-                    <div class="pipe-arrow">→</div>
-                    <div class="pipe-node rhombus" id="pipe-index" title="B+ Tree Index"><span>INDEX</span></div>
-                    <div class="pipe-arrow">→</div>
-                    <div class="pipe-node square" id="pipe-buffer" title="Buffer Pool"><span>BUFFER</span></div>
-                    <div class="pipe-arrow">→</div>
-                    <div class="pipe-node cylinder" id="pipe-disk" title="Disk I/O"><span>DISK</span></div>
-                </div>
-
-                <div class="heatmap-legend" style="padding: 0.5rem 1rem; border-top: 1px solid var(--border); display: flex; gap: 1rem; font-size: 0.7rem; color: var(--muted);">
-                    <div style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; background: #27272a; border-radius: 2px;"></span> Idle</div>
-                    <div style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; background: var(--primary); border-radius: 2px;"></span> Pinned</div>
-                    <div style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border: 1px solid var(--warning); border-radius: 2px;"></span> Clock Hand</div>
-                </div>
-            </section>
-
-            <section class="panel" id="schemaPanel" style="grid-column: 1 / -1;">
-                <div class="panel-header">
-                    <h2>Illustrative Schema Diagram</h2>
-                </div>
-                <div class="panel-content" id="topologyContainer" style="padding: 0; overflow: hidden; position: relative; background: radial-gradient(circle at center, #111827 0%, #09090b 100%);">
-                    <svg id="topologySvg" width="100%" height="450" style="display: block;">
-                        <g id="viewport">
-                            <!-- SVG content drawn by JS -->
-                        </g>
+            <section class="telemetry-ribbon" aria-label="Live engine telemetry">
+                <article class="metric-card">
+                    <h2 class="metric-label">Buffer hit rate · window</h2>
+                    <p class="metric-value" id="cacheHitRate" aria-live="polite">—</p>
+                </article>
+                <article class="metric-card">
+                    <h2 class="metric-label">Queries / second · window</h2>
+                    <p class="metric-value" id="queryThroughput">—</p>
+                    <svg id="qpsSparkline" class="sparkline" viewBox="0 0 240 44"
+                         role="img" aria-label="Query throughput over the last 60 seconds">
+                        <path id="qpsSparklinePath" d=""></path>
                     </svg>
+                </article>
+                <article class="metric-card">
+                    <h2 class="metric-label">Statement latency · p50 / p95 / p99</h2>
+                    <p class="metric-value metric-value-small" id="latencyPercentiles">—</p>
+                </article>
+                <article class="metric-card">
+                    <h2 class="metric-label">Average disk / fsync latency</h2>
+                    <p class="metric-value" id="diskLatency">—</p>
+                </article>
+                <article class="metric-card">
+                    <h2 class="metric-label">Active statements / gate waiters</h2>
+                    <p class="metric-value" id="statementActivity">—</p>
+                </article>
+            </section>
+
+            <section class="panel query-panel" aria-labelledby="queryHeading">
+                <div class="panel-header">
+                    <div>
+                        <p class="eyebrow">Engine interface</p>
+                        <h2 id="queryHeading">SQL query console</h2>
+                    </div>
+                    <span class="keyboard-hint">Ctrl + Enter to run</span>
                 </div>
+                <label class="sr-only" for="sqlInput">SQL statement</label>
+                <div class="console-container">
+                    <span class="prompt" aria-hidden="true">db&gt;</span>
+                    <textarea id="sqlInput" class="console-input" rows="3"
+                              placeholder="SELECT id FROM users;" spellcheck="false"
+                              autocomplete="off" aria-describedby="queryHelp"></textarea>
+                    <button id="runQueryButton" class="button button-primary" type="button">Run</button>
+                </div>
+                <p id="queryHelp" class="help-text">Use the engine's SQL subset. Up/Down recalls local query history.</p>
+                <div id="queryStatus" class="query-status" role="status" aria-live="polite"></div>
+                <div id="queryResult" class="query-result" aria-live="polite">
+                    <p class="empty-state">Query results and EXPLAIN plans appear here.</p>
+                </div>
+            </section>
+
+            <section class="panel storage-panel" aria-labelledby="storageHeading">
+                <div class="panel-header">
+                    <div>
+                        <p class="eyebrow">Page cache and persistence</p>
+                        <h2 id="storageHeading">Storage &amp; buffer pool</h2>
+                    </div>
+                    <span id="frameSummary" class="panel-meta">Waiting for frame snapshot</span>
+                </div>
+                <div id="bufferPoolHeatmap" class="buffer-heatmap" role="list"
+                     aria-label="Buffer pool frame states"></div>
+                <div class="heatmap-legend" aria-label="Frame state legend">
+                    <span><i class="legend-swatch pinned"></i>Pinned</span>
+                    <span><i class="legend-swatch dirty"></i>Dirty</span>
+                    <span><i class="legend-swatch clean"></i>Clean</span>
+                    <span><i class="legend-swatch free"></i>Free</span>
+                    <span><i class="legend-swatch clock"></i>Clock hand</span>
+                </div>
+                <div class="pipeline" aria-label="Observed execution pipeline">
+                    <div class="pipe-node" id="pipe-parser">PARSER</div>
+                    <span class="pipe-arrow" aria-hidden="true">›</span>
+                    <div class="pipe-node" id="pipe-plan">PLAN</div>
+                    <span class="pipe-arrow" aria-hidden="true">›</span>
+                    <div class="pipe-node" id="pipe-scan">INDEX / SCAN</div>
+                    <span class="pipe-arrow" aria-hidden="true">›</span>
+                    <div class="pipe-node" id="pipe-buffer">BUFFER</div>
+                    <span class="pipe-arrow" aria-hidden="true">›</span>
+                    <div class="pipe-node" id="pipe-disk">DISK</div>
+                </div>
+                <dl id="storageSummary" class="storage-summary">
+                    <div><dt>Database pages</dt><dd id="databasePages">—</dd></div>
+                    <div><dt>Free pages</dt><dd id="freePages">—</dd></div>
+                    <div><dt>WAL size</dt><dd id="walSize">—</dd></div>
+                    <div><dt>Last checkpoint</dt><dd id="lastCheckpoint">—</dd></div>
+                    <div class="recovery-entry"><dt>Recovery</dt><dd id="recoverySummary">—</dd></div>
+                </dl>
+            </section>
+
+            <section class="panel schema-panel" aria-labelledby="schemaHeading">
+                <div class="panel-header">
+                    <div>
+                        <p class="eyebrow">Catalog-backed metadata</p>
+                        <h2 id="schemaHeading">Schema Atlas</h2>
+                    </div>
+                    <span id="schemaSummary" class="panel-meta">Loading catalog</span>
+                </div>
+                <div id="schemaAtlas" class="schema-atlas" aria-live="polite">
+                    <p class="empty-state">Loading tables from the catalog…</p>
+                </div>
+                <section id="seedPanel" class="seed-panel" hidden aria-labelledby="seedHeading">
+                    <h3 id="seedHeading">Load demo dataset</h3>
+                    <p>Review or edit this SQL. Each statement is submitted through the normal query API.</p>
+                    <label class="sr-only" for="seedScript">Editable demo dataset SQL seed</label>
+                    <textarea id="seedScript" class="seed-script" rows="13" spellcheck="false"></textarea>
+                    <button id="loadDemoButton" class="button button-secondary" type="button">
+                        Run seed script
+                    </button>
+                    <p id="seedStatus" class="query-status" role="status" aria-live="polite"></p>
+                </section>
             </section>
         </main>
+        <footer class="page-footer">
+            <span>Engine telemetry is sampled from the API; unavailable values remain blank.</span>
+            <span id="pollStatus" role="status" aria-live="polite">Connecting…</span>
+        </footer>
     </div>
-
-    <script src="index.js"></script>
 </body>
 </html>

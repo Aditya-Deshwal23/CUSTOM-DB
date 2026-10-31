@@ -11,7 +11,8 @@ available.
   `DELETE`, `SELECT`, `SHOW TABLES`, `DESCRIBE`, `EXPLAIN`, and
   `EXPLAIN ANALYZE`.
 - INT, BIGINT, DOUBLE, BOOLEAN, and bounded VARCHAR columns; primary key,
-  NOT NULL, and unique-index checks.
+  NOT NULL, unique-index, and column-level `REFERENCES table(column)`
+  constraints. Foreign keys target unique columns of the same type.
 - Predicates with comparisons, AND/OR/NOT, IN, BETWEEN, LIKE, and IS NULL;
   arithmetic expressions; projection; ORDER BY; LIMIT/OFFSET; COUNT, SUM,
   MIN, MAX, AVG, and hash GROUP BY.
@@ -27,12 +28,15 @@ available.
 operator wall time, buffer-pool page-fetch/miss deltas, and the selected access
 path. It is not a trace of dashboard simulation behavior.
 
-The catalog is currently serialized into one page. Foreign keys, composite
-indexes/primary keys, multi-statement transactions, SQL joins, and general
-transaction isolation are not implemented. VARCHAR equality indexes use a
+The catalog is currently serialized into one page. Catalog format v2 persists
+foreign-key targets and can read v1 catalogs. Invalid child inserts, updates or
+deletes of referenced keys, and drops of referenced tables are rejected.
+Table-level/composite foreign keys, composite indexes/primary keys,
+multi-statement transactions, SQL joins, and general transaction isolation are
+not implemented. VARCHAR equality indexes use a
 64-bit hash prefix and verify candidate rows; VARCHAR index range scans and
-index ordering are not supported. Query results are rendered as tab/newline
-text for the existing API.
+index ordering are not supported. The HTTP API returns typed column and row
+arrays; the legacy executor string interface remains tab/newline text.
 
 The engine enforces `MAX_RESULT_ROWS`, `MAX_SORT_ROWS`, and a cooperative
 statement timeout (`STATEMENT_TIMEOUT_MS`). A timeout check is performed while

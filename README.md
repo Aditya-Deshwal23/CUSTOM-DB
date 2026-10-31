@@ -1,69 +1,114 @@
 # CUSTOM-DB
 
-CUSTOM-DB is a C++17 storage-engine prototype with a Crow HTTP service and a vanilla HTML/CSS/JavaScript dashboard. One Docker image runs the backend and serves the static dashboard; there is no frontend framework or JavaScript build step.
+[![CI](https://github.com/Aditya-Deshwal23/CUSTOM-DB/actions/workflows/ci.yml/badge.svg)](https://github.com/Aditya-Deshwal23/CUSTOM-DB/actions/workflows/ci.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Coverage report](https://img.shields.io/badge/coverage-gcovr%20in%20CI-blue)](https://github.com/Aditya-Deshwal23/CUSTOM-DB/actions/workflows/ci.yml)
 
-## Status & limitations
+CUSTOM-DB is a small C++17 relational storage engine presented as one self-contained service: Crow serves a versioned SQL API and a vanilla HTML/CSS/JavaScript dashboard, while a page-oriented buffer pool, B+ tree, single-page SQL catalog, and checksummed redo WAL provide an inspectable persistence path from statement to disk. It is an engineering project for learning and demonstration—not a general-purpose or production database—and its measured trade-offs and unsupported features are documented below.
 
-### Implemented
+## Live demo
 
-- The versioned API exposes liveness/readiness, SQL queries, table metadata, live engine statistics, Prometheus metrics, build metadata, and key-protected checkpoints. Legacy `/health`, `/api/metrics`, and `/api/query` aliases remain available.
-- API responses use Crow's JSON implementation, positioned SQL errors, request IDs, configurable body/SQL/result/time limits, per-IP rate limiting, optional write authentication, a database-size quota, and an explicit CORS origin allow-list.
-- Static dashboard assets are loaded from an allow-listed in-memory set and served with security headers, ETags, and cache policy.
-- The query API preserves legacy integer `INSERT <key> <value>` / `SELECT <key>` commands and also executes the documented SQL subset in [docs/SQL_EXECUTION.md](docs/SQL_EXECUTION.md).
-- SQL tables and indexes are persisted in a one-page catalog; point/range/index-order scans, sequential scans, filters, projections, sorting, limits, aggregates, and transactional DML are implemented.
-- `EXPLAIN` displays the planned operator tree; `EXPLAIN ANALYZE` executes the query and reports operator rows, inclusive wall time, buffer-pool page deltas, and access path.
-- SQL write statements run as individual WAL transactions and roll back completely on statement failure. Reads take the shared statement gate; writes take it exclusively.
-- The service reads `PORT` and `DB_PATH`, serves the dashboard from the same origin, and handles SIGINT/SIGTERM shutdown.
-- The root Dockerfile builds a single service image. Docker Compose mounts a named volume at `/data`.
+Try the [live dashboard](https://custom-db-engine.onrender.com). It runs on Render's Free tier: its local filesystem is ephemeral and the service spins down when idle, so data may reset. Do not use the demo for persistent data. Persistent disks require a paid Render instance; see Render's [Free instance](https://render.com/docs/free) and [disk](https://render.com/docs/disks) documentation.
 
-### Prototype
+## 60-second quickstart
 
-- The WAL-backed executor runs each write statement as a single-writer auto-commit transaction. It logs full-page after-images and a COMMIT record to `<DB_PATH>-wal`, restores before-images on statement failure, and replays committed changes before serving requests.
-- Every write statement syncs its WAL COMMIT before returning, regardless of `DURABILITY`. `full` is the default, `normal` also runs periodic background syncs using `WAL_SYNC_INTERVAL_MS` (default 1000 ms), and legacy `off` mode disables only that background thread.
-- The dashboard's schema visualization and simulation trace are illustrative. Simulation mode shows a persistent warning; real query plans are available through SQL `EXPLAIN`.
-- Database pages and WAL records use explicit little-endian layouts and CRC32C. Checkpointing syncs dirty database pages before truncating the WAL.
-- A source-backed SQL lexer and v1 recursive-descent/Pratt parser produce statement/expression ASTs with positioned syntax errors; parser tests and a nightly ASan/UBSan grammar fuzzer cover the front end.
+Requires Docker and `curl`. The published v1.0.0 image is multi-architecture and stores database files in the named volume:
 
-### Not implemented
-
-- General SQL, joins, foreign keys, composite indexes, multi-statement transactions, and general transaction isolation. The SQL catalog currently fits on one page; VARCHAR index ordering and ranges are not supported.
-- A user-facing `--check` command (planned for Phase 13), or writer latch crabbing.
-- Production-grade concurrency, performance, or durability guarantees.
-
-See [docs/CLAIMS.md](docs/CLAIMS.md) for claim-by-claim evidence, [docs/CONCURRENCY.md](docs/CONCURRENCY.md) for the statement-level concurrency model, [docs/adr/0002-concurrency.md](docs/adr/0002-concurrency.md) for its design decision, and [docs/RESUME_EVIDENCE_REPORT.md](docs/RESUME_EVIDENCE_REPORT.md) for the existing local audit.
-The disk and WAL formats are documented in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md), recovery behavior in [docs/WAL_AND_RECOVERY.md](docs/WAL_AND_RECOVERY.md), the design decision in [docs/adr/0001-wal-design.md](docs/adr/0001-wal-design.md), and measured local benchmarks in [docs/benchmarks.md](docs/benchmarks.md).
-
-## Routes
-
-- `/`: dashboard
-- `GET /healthz`, `GET /readyz`: liveness and recovery/writability readiness
-- `POST /api/v1/query`: SQL request/response contract documented in [docs/openapi.yaml](docs/openapi.yaml)
-- `GET /api/v1/tables`, `GET /api/v1/tables/{name}`, `GET /api/v1/stats`
-- `GET /api/v1/stats/buffer_pool`: per-frame pin, dirty, and reference-bit snapshot
-- `GET /api/v1/stats/storage`: database pages, free pages, WAL size, checkpoint, and recovery summary
-- `GET /metrics`: Prometheus 0.0.4 exposition with route/status counters and log2-microsecond histograms
-- `GET /api/v1/version`, `POST /api/v1/admin/checkpoint`
-- Legacy `/health`, `/api/metrics`, and `/api/query` aliases return deprecated responses.
-
-The current Render demo is [custom-db-engine.onrender.com](https://custom-db-engine.onrender.com). Set `READ_ONLY=1` for the public demo; Render availability and filesystem persistence depend on the configured service and plan.
-
-Metrics use real statement, HTTP, buffer-pool, disk, WAL, and gate events. `/api/v1/stats` reports a buffer-pool hit rate calculated from counter deltas between requests; the deprecated `/api/metrics` retains legacy field names and derives `active_latches` from active statements. Successful legacy `SELECT <key>` misses are not counted as errors.
-
-API settings are validated at startup: `MAX_BODY_BYTES` (default 65536), `MAX_SQL_BYTES` (16384), `MAX_RESULT_ROWS` (1000), `STATEMENT_TIMEOUT_MS` (2000), `SLOW_QUERY_MS` (0 disables slow-query logging), `RATE_LIMIT_RPS` (20), `RATE_LIMIT_BURST` (40), `MAX_DB_BYTES` (unset means no quota), `READ_ONLY` (0/1), optional `API_KEY`, comma-separated `CORS_ORIGINS` (empty by default), and `LOG_LEVEL` (`debug`, `info`, `warn`, `error`, or `off`). `DEMO_LOAD=1` opts in to a low-rate SQL point-lookup workload through the normal executor; it is disabled by default and is reported as `demo_load`. When `API_KEY` is set, SQL writes and administrative checkpoints require `X-API-Key`; checkpoints always require a configured key.
-
-## Build and run
-
-See [RUN_INSTRUCTIONS.md](RUN_INSTRUCTIONS.md) for native, Docker, and development commands. A quick Docker run is:
-
-```bash
-docker build -t custom-db .
-docker run --rm -p 8080:8080 -e PORT=8080 -e DB_PATH=/data/custom.db -e READ_ONLY=1 \
-  -v custom-db-data:/data custom-db
+```sh
+docker volume create custom-db-data
+docker run -d --name custom-db -p 8080:8080 \
+  -e PORT=8080 -e DB_PATH=/data/custom.db \
+  --mount source=custom-db-data,target=/data \
+  ghcr.io/aditya-deshwal23/custom-db:1.0.0
+curl -fsS http://localhost:8080/readyz
+curl -fsS -X POST http://localhost:8080/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"CREATE TABLE quickstart (id INT PRIMARY KEY, value INT)"}'
+curl -fsS -X POST http://localhost:8080/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"INSERT INTO quickstart VALUES (1, 42)"}'
+curl -fsS -X POST http://localhost:8080/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"SELECT id, value FROM quickstart"}'
+docker stop custom-db
+docker rm custom-db
 ```
 
-The dashboard console accepts legacy `INSERT 42 100` / `SELECT 42` commands and SQL such as `CREATE TABLE`, `INSERT INTO`, and `SELECT`. See [docs/SQL_EXECUTION.md](docs/SQL_EXECUTION.md) for the supported subset and known semantic differences.
+CI runs the same container workflow through [`scripts/quickstart.sh`](scripts/quickstart.sh) against the image it just built. For a local source build, use the [development instructions](RUN_INSTRUCTIONS.md).
 
-## Verification
+## What works today
 
-CI builds GCC and Clang Debug/Release configurations, runs CTest and the pytest API contract suite, fuzzes API input, runs a seeded 10,000-statement SQLite differential test, builds ASan+UBSan and TSan configurations, checks changed C++ formatting, lints the Dockerfile, and builds the image without pushing it. Nightly checks run longer API and SQL grammar fuzzing. The SQL execution benchmark covers point, 100-row range, insert, update, and full-scan aggregate workloads at 10k/100k/1M rows; see [docs/benchmarks.md](docs/benchmarks.md).
-Linux CI runs 200 seeded crash iterations per PR, and the nightly workflow runs 5,000; the local runner is [tools/crashtest](tools/crashtest).
+| Area | Implemented | Limits | Not implemented |
+|---|---|---|---|
+| Storage and indexes | ✓ [storage tests](tests/storage_test.cpp), [B+ tree tests](tests/b_plus_tree_test.cpp) | One process-local database; tuple max 4,067 bytes | Overflow pages; replication |
+| SQL | ✓ [SQL execution tests](tests/sql_execution_test.cpp), [parser tests](tests/sql_parser_test.cpp) | Deliberate SQL subset; see [reference](docs/SQL_REFERENCE.md) | Joins; general SQL; multi-statement transactions |
+| Recovery | ✓ [WAL tests](tests/regression/known_bugs_test.cpp), [Linux crash workflow](.github/workflows/ci.yml) | Full-page after-image WAL can amplify writes | MVCC; distributed recovery |
+| Concurrency | ✓ [writer fairness test](tests/sql_execution_test.cpp), [TSan stress](.github/workflows/ci.yml) | Multiple readers, one writer, statement-level serialization | Concurrent writers; snapshot isolation |
+| Planner and execution | ✓ [plan/execution tests](tests/sql_execution_test.cpp), [SQL benchmarks](docs/BENCHMARKS.md) | Sort and grouping use memory; one-page catalog | Cost-based optimizer; spill-to-disk operators |
+| HTTP service | ✓ [API contract tests](tests/api/test_api.py), [OpenAPI](docs/openapi.yaml) | One service; bounded API and statement settings | Replication protocol; clustering |
+| Dashboard | ✓ [browser tests](tests/dashboard/test_dashboard.py) | Same-origin, live data; replay is explicitly labeled | Offline editing or fake live telemetry |
+| Packaging | ✓ [container CI](.github/workflows/ci.yml), [crash demo](scripts/demo_crash.sh) | Render Free storage is ephemeral | Persistent storage on Render Free |
+
+More detail and evidence links live in the [claim ledger](docs/CLAIMS.md) and [limitations](docs/LIMITATIONS.md).
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Client["curl / browser"] --> Crow["Crow HTTP routes"]
+  Crow --> Middleware["Request validation, auth, limits"]
+  Middleware --> API["ApiServer"]
+  API --> Parser["Request parse + parameter binding"]
+  Parser --> Executor["Executor / SqlEngine statement gate"]
+  Executor --> Planner["SQL planner + Volcano operators"]
+  Planner --> Catalog["Catalog + B+ tree + table heap"]
+  Catalog --> Pool["Guarded buffer pool"]
+  Pool --> Disk["Page disk manager"]
+  Executor -->|write statement| WAL["Redo WAL"]
+  WAL -->|synced COMMIT before ack| Executor
+  Disk --> Volume["/data volume"]
+  WAL --> Volume
+  Main["Startup recovery"] --> WAL
+  Main --> Crow
+```
+
+The diagram reflects the [runtime wiring](src/main.cpp), [API routes](src/api/routes.cpp), [executor](src/executor.cpp), and [SQL planner/operators](src/sql_executor.cpp). Recovery completes before the HTTP server starts.
+
+## Life of a statement
+
+1. Crow receives `POST /api/v1/query`; middleware assigns a request ID and enforces request, authentication, rate, and body limits.
+2. The API validates the JSON contract and binds parameters. The SQL lexer/parser creates a positioned statement AST.
+3. The SQL executor resolves catalog metadata, builds the selected access path/operator pipeline, and checks cooperative cancellation and row limits.
+4. Operators read through page guards into the buffer pool, using the B+ tree for supported key lookups/ranges or a table scan otherwise.
+5. A write statement owns the exclusive statement gate and one WAL transaction. Before-images support rollback; committed page after-images plus COMMIT are appended and synced before the statement can be acknowledged.
+6. The API serializes typed rows or a structured error. Checkpointing later flushes database pages, syncs the database, and then replaces/truncates the WAL.
+
+See [ARCHITECTURE.md](docs/ARCHITECTURE.md), [WAL_AND_RECOVERY.md](docs/WAL_AND_RECOVERY.md), and [CONCURRENCY.md](docs/CONCURRENCY.md) for precise ordering and caveats.
+
+## Benchmark headline
+
+Five seeded, warm point-read runs against 10,000 rows on an Apple M5 (`arm64`), macOS 27.0.1, Python 3.14.7, SQLite 3.53.4; 1,000 reads per engine per run. Setup is excluded. CUSTOM-DB is measured through its HTTP/JSON API, while SQLite is measured in-process through Python's `sqlite3` module, so this is a user-facing path comparison, **not an apples-to-apples engine-core benchmark**.
+
+| Implementation / path | Median throughput | Median p50 | Median p95 |
+|---|---:|---:|---:|
+| CUSTOM-DB, HTTP + JSON | 6,000 reads/s | 158.0 us | 207.7 us |
+| SQLite, Python `sqlite3` | 671,366 reads/s | 1.38 us | 1.67 us |
+
+Reproduce with [`tools/benchmark_sqlite.py`](tools/benchmark_sqlite.py); full methodology and other engine benchmarks are in [BENCHMARKS.md](docs/BENCHMARKS.md). These are local observations, not performance promises.
+
+## Durability demonstration
+
+[`scripts/demo_crash.sh`](scripts/demo_crash.sh) writes through the HTTP API, sends `SIGKILL` during the write loop, restarts on the same named volume, checks recovery and `--check`, verifies every acknowledged row, then checks graceful shutdown. The recorded run recovered all 1,752 acknowledged writes (plus one committed but unacknowledged row); open [`recovery.cast`](docs/assets/recovery.cast) with [asciinema](https://asciinema.org/) or use the [demo walkthrough](docs/DEMO.md). CI runs 200 seeded crash iterations on PR/push; nightly CI runs 5,000.
+
+## Docs
+
+- [Architecture](docs/ARCHITECTURE.md), [SQL reference](docs/SQL_REFERENCE.md), [API contract](docs/openapi.yaml)
+- [Configuration](docs/CONFIG.md), [file format](docs/FILE_FORMAT.md), [WAL and recovery](docs/WAL_AND_RECOVERY.md), [concurrency](docs/CONCURRENCY.md)
+- [Benchmarks](docs/BENCHMARKS.md), [limitations](docs/LIMITATIONS.md), [claim ledger](docs/CLAIMS.md)
+- [Interview Q&A](docs/INTERVIEW_QA.md), [contributing](docs/CONTRIBUTING.md), [security](docs/SECURITY.md), [changelog](docs/CHANGELOG.md)
+- [v1.0.0 release notes](docs/releases/v1.0.0.md)
+- [Three-minute demo](docs/DEMO.md), [engineering post-mortem](DIFFICULTIES_FACED.md)
+
+## License
+
+MIT; see [LICENSE](LICENSE).

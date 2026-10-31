@@ -4,7 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
-#include <charconv>
+
 #include <csignal>
 #include <cstddef>
 #include <cstdio>
@@ -18,6 +18,7 @@
 #include "buffer_pool_manager.h"
 #include "crc32c.h"
 #include "db_error.h"
+#include "logging.h"
 #include "metrics/metrics.h"
 
 #ifdef _WIN32
@@ -256,36 +257,6 @@ struct ScannedRecord {
     uint64_t end_offset;
 };
 
-DurabilityMode ReadModeFromEnvironment() {
-    const char* configured = std::getenv("DURABILITY");
-    const std::string mode = configured == nullptr ? "full" : configured;
-    if (mode == "full") {
-        return DurabilityMode::FULL;
-    }
-    if (mode == "normal") {
-        return DurabilityMode::NORMAL;
-    }
-    if (mode == "off") {
-        return DurabilityMode::OFF;
-    }
-    throw DbError(ErrorCode::INVALID_ARGUMENT, "DURABILITY must be full, normal, or off");
-}
-
-uint64_t ReadUnsignedEnvironment(const char* name, uint64_t fallback) {
-    const char* configured = std::getenv(name);
-    if (configured == nullptr || *configured == '\0') {
-        return fallback;
-    }
-    const char* end = configured + std::strlen(configured);
-    uint64_t value = 0;
-    const auto parsed = std::from_chars(configured, end, value);
-    if (parsed.ec != std::errc{} || parsed.ptr != end || value == 0) {
-        throw DbError(ErrorCode::INVALID_ARGUMENT,
-                      std::string(name) + " must be a positive integer");
-    }
-    return value;
-}
-
 }  // namespace
 
 TxnContext::TxnContext(BufferPoolManager& buffer_pool, WriteAheadLog& wal, uint64_t txn_id,
@@ -314,8 +285,7 @@ void TxnContext::Commit() {
         try {
             wal_->Checkpoint(*buffer_pool_);
         } catch (const std::exception& error) {
-            std::fprintf(stderr, "Automatic checkpoint failed after durable commit: %s\n",
-                         error.what());
+            LogMessage("error", "automatic_checkpoint_failed", error.what());
         }
     }
 }
@@ -369,14 +339,17 @@ bool FailPoint::IsConfigured(const std::string& name, const std::string& action)
 }
 
 WriteAheadLog::WriteAheadLog(const std::string& database_path)
-    : WriteAheadLog(database_path, ReadModeFromEnvironment(),
-                    ReadUnsignedEnvironment("WAL_SYNC_INTERVAL_MS", 1000),
-                    ReadUnsignedEnvironment("WAL_MAX_BYTES", 16U * 1024U * 1024U)) {}
+    : WriteAheadLog(database_path, database_path + "-wal", DurabilityMode::FULL, 1000,
+                    16U * 1024U * 1024U) {}
 
 WriteAheadLog::WriteAheadLog(const std::string& database_path, DurabilityMode mode,
                              uint64_t sync_interval_ms, uint64_t max_bytes)
+    : WriteAheadLog(database_path, database_path + "-wal", mode, sync_interval_ms, max_bytes) {}
+
+WriteAheadLog::WriteAheadLog(const std::string& database_path, const std::string& wal_path,
+                             DurabilityMode mode, uint64_t sync_interval_ms, uint64_t max_bytes)
     : database_path_(database_path),
-      filename_(database_path + "-wal"),
+      filename_(wal_path),
       mode_(mode),
       sync_interval_ms_(sync_interval_ms),
       max_bytes_(max_bytes),
@@ -706,9 +679,12 @@ WalRecoveryStats WriteAheadLog::Recover(IDiskManager& disk_manager) {
     MetricsRegistry::Instance().recovery_ran.Set(1);
     MetricsRegistry::Instance().recovery_records.Add(stats.records);
     MetricsRegistry::Instance().recovery_duration_us.Observe(stats.elapsed_us);
-    std::clog << "[WAL] recovery records=" << stats.records << " commits=" << stats.commits
-              << " pages_replayed=" << stats.pages_replayed
-              << " truncated_bytes=" << stats.truncated_bytes << " ms=" << stats.elapsed_ms << '\n';
+    LogJson("info", "wal_recovery",
+            "{\"records\":" + std::to_string(stats.records) +
+                ",\"commits\":" + std::to_string(stats.commits) +
+                ",\"pages_replayed\":" + std::to_string(stats.pages_replayed) +
+                ",\"truncated_bytes\":" + std::to_string(stats.truncated_bytes) +
+                ",\"elapsed_ms\":" + std::to_string(stats.elapsed_ms) + "}");
     (void)valid_end;
     return stats;
 }

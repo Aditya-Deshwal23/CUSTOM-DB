@@ -1,8 +1,5 @@
 #include <algorithm>
-#include <cctype>
 #include <charconv>
-#include <cmath>
-#include <cstdlib>
 #include <iostream>
 #include <string_view>
 
@@ -79,141 +76,7 @@ std::string MethodName(crow::HTTPMethod method) {
     }
 }
 
-std::string ReadEnvironment(const char* name) {
-    const char* value = std::getenv(name);
-    return value == nullptr ? std::string{} : std::string(value);
-}
-
-uint64_t ReadUnsigned(const char* name, uint64_t fallback) {
-    const std::string text = ReadEnvironment(name);
-    if (text.empty()) {
-        return fallback;
-    }
-    uint64_t value = 0;
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || value == 0U) {
-        throw std::invalid_argument(std::string("Invalid positive integer in ") + name);
-    }
-    return value;
-}
-
-uint64_t ReadUnsignedAllowZero(const char* name, uint64_t fallback) {
-    const std::string text = ReadEnvironment(name);
-    if (text.empty()) {
-        return fallback;
-    }
-    uint64_t value = 0;
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) {
-        throw std::invalid_argument(std::string("Invalid non-negative integer in ") + name);
-    }
-    return value;
-}
-
-double ReadPositiveDouble(const char* name, double fallback) {
-    const std::string text = ReadEnvironment(name);
-    if (text.empty()) {
-        return fallback;
-    }
-    char* end = nullptr;
-    const double value = std::strtod(text.c_str(), &end);
-    if (end != text.c_str() + text.size() || !std::isfinite(value) || value <= 0.0) {
-        throw std::invalid_argument(std::string("Invalid positive number in ") + name);
-    }
-    return value;
-}
-
-bool ReadBoolean(const char* name, bool fallback) {
-    const std::string text = ReadEnvironment(name);
-    if (text.empty()) {
-        return fallback;
-    }
-    if (text == "1") {
-        return true;
-    }
-    if (text == "0") {
-        return false;
-    }
-    throw std::invalid_argument(std::string(name) + " must be 0 or 1");
-}
-
-std::vector<std::string> ReadOrigins() {
-    const std::string value = ReadEnvironment("CORS_ORIGINS");
-    std::vector<std::string> origins;
-    size_t begin = 0;
-    while (begin < value.size()) {
-        size_t end = value.find(',', begin);
-        if (end == std::string::npos) {
-            end = value.size();
-        }
-        size_t first = begin;
-        size_t last = end;
-        while (first < last && std::isspace(static_cast<unsigned char>(value[first])) != 0) {
-            ++first;
-        }
-        while (last > first && std::isspace(static_cast<unsigned char>(value[last - 1U])) != 0) {
-            --last;
-        }
-        if (last > first) {
-            std::string origin = value.substr(first, last - first);
-            const size_t separator = origin.find("://");
-            const std::string_view scheme(origin.data(),
-                                          separator == std::string::npos ? origin.size() : separator);
-            if (origin == "*" || separator == std::string::npos ||
-                (scheme != "http" && scheme != "https") ||
-                separator + 3U >= origin.size() ||
-                origin.find_first_of("/?#", separator + 3U) != std::string::npos) {
-                throw std::invalid_argument(
-                    "CORS_ORIGINS must contain HTTP(S) origins without paths");
-            }
-            origins.push_back(std::move(origin));
-        }
-        begin = end + 1U;
-    }
-    return origins;
-}
-
 }  // namespace
-
-ApiConfig LoadApiConfig() {
-    ApiConfig config;
-    config.max_body_bytes = ReadUnsigned("MAX_BODY_BYTES", config.max_body_bytes);
-    config.max_sql_bytes = ReadUnsigned("MAX_SQL_BYTES", config.max_sql_bytes);
-    config.max_result_rows = ReadUnsigned("MAX_RESULT_ROWS", config.max_result_rows);
-    config.statement_timeout_ms = ReadUnsigned("STATEMENT_TIMEOUT_MS", config.statement_timeout_ms);
-    config.slow_query_ms = ReadUnsignedAllowZero("SLOW_QUERY_MS", config.slow_query_ms);
-    config.rate_limit_rps = ReadPositiveDouble("RATE_LIMIT_RPS", config.rate_limit_rps);
-    config.rate_limit_burst = ReadPositiveDouble("RATE_LIMIT_BURST", config.rate_limit_burst);
-    const std::string quota = ReadEnvironment("MAX_DB_BYTES");
-    if (!quota.empty()) {
-        uint64_t value = 0;
-        const auto parsed = std::from_chars(quota.data(), quota.data() + quota.size(), value);
-        if (parsed.ec != std::errc{} || parsed.ptr != quota.data() + quota.size() || value == 0U) {
-            throw std::invalid_argument("MAX_DB_BYTES must be a positive integer");
-        }
-        config.max_db_bytes = value;
-    }
-    config.read_only = ReadBoolean("READ_ONLY", false);
-    config.api_key = ReadEnvironment("API_KEY");
-    if (config.api_key.size() > 4096U) {
-        throw std::invalid_argument("API_KEY must not exceed 4096 bytes");
-    }
-    config.cors_origins = ReadOrigins();
-    config.log_level = ReadEnvironment("LOG_LEVEL");
-    if (config.log_level.empty()) {
-        config.log_level = "info";
-    }
-    if (config.log_level != "debug" && config.log_level != "info" && config.log_level != "warn" &&
-        config.log_level != "error" && config.log_level != "off") {
-        throw std::invalid_argument("LOG_LEVEL must be debug, info, warn, error, or off");
-    }
-    if (config.max_body_bytes > 16U * 1024U * 1024U || config.max_result_rows > MAX_RESULT_ROWS ||
-        config.statement_timeout_ms > 600000U || config.slow_query_ms > 3600000U ||
-        config.rate_limit_burst < 1.0) {
-        throw std::invalid_argument("API limits are outside their supported ranges");
-    }
-    return config;
-}
 
 bool ApiMiddleware::ConsumeToken(const std::string& client_ip) {
     const auto now = std::chrono::steady_clock::now();
@@ -244,7 +107,25 @@ bool ApiMiddleware::ConsumeToken(const std::string& client_ip) {
     return true;
 }
 
+bool ApiMiddleware::WaitForIdle(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(active_requests_mutex_);
+    return active_requests_changed_.wait_for(lock, timeout, [this]() {
+        return active_requests.load(std::memory_order_acquire) == 0U;
+    });
+}
+
+void ApiMiddleware::CompleteRequest(context& ctx) {
+    if (!ctx.active_counted) {
+        return;
+    }
+    ctx.active_counted = false;
+    active_requests.fetch_sub(1, std::memory_order_acq_rel);
+    active_requests_changed_.notify_all();
+}
+
 void ApiMiddleware::before_handle(crow::request& request, crow::response& response, context& ctx) {
+    active_requests.fetch_add(1, std::memory_order_acq_rel);
+    ctx.active_counted = true;
     const auto complete_early = [&response]() { response.end(); };
     ctx.started = std::chrono::steady_clock::now();
     ctx.client_ip = request.remote_ip_address.empty() ? "unknown" : request.remote_ip_address;
@@ -254,6 +135,13 @@ void ApiMiddleware::before_handle(crow::request& request, crow::response& respon
     } else {
         ctx.request_id =
             "r" + std::to_string(next_request_id_.fetch_add(1, std::memory_order_relaxed));
+    }
+
+    if (draining.load(std::memory_order_acquire) && request.url != "/healthz" &&
+        request.url != "/readyz") {
+        response = ErrorResponse(503, "UNAVAILABLE", "Service is draining", ctx.request_id);
+        complete_early();
+        return;
     }
 
     if (request.method == crow::HTTPMethod::OPTIONS) {
@@ -328,6 +216,14 @@ void ApiMiddleware::before_handle(crow::request& request, crow::response& respon
 }
 
 void ApiMiddleware::after_handle(crow::request& request, crow::response& response, context& ctx) {
+    struct RequestCompletion {
+        ApiMiddleware& middleware;
+        context& request_context;
+        ~RequestCompletion() {
+            middleware.CompleteRequest(request_context);
+        }
+    } completion{*this, ctx};
+
     ApplyResponseHeaders(response);
     response.add_header("X-Request-Id", ctx.request_id);
     const std::string origin = request.get_header_value("Origin");

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -17,25 +18,13 @@
 
 namespace relational_db {
 
-struct ApiConfig {
-    uint64_t max_body_bytes{64U * 1024U};
-    uint64_t max_sql_bytes{16U * 1024U};
-    uint64_t max_result_rows{1000U};
-    uint64_t statement_timeout_ms{2000U};
-    uint64_t slow_query_ms{0U};
-    double rate_limit_rps{20.0};
-    double rate_limit_burst{40.0};
-    uint64_t max_db_bytes{0};
-    bool read_only{false};
-    std::string api_key;
-    std::vector<std::string> cors_origins;
-    std::string log_level{"info"};
-};
+using ApiConfig = Config;
 
 struct ApiRequestContext {
     std::string request_id;
     std::string client_ip;
     std::chrono::steady_clock::time_point started;
+    bool active_counted{false};
 };
 
 class ApiMiddleware {
@@ -45,10 +34,14 @@ class ApiMiddleware {
     ApiConfig config;
     std::atomic<uint64_t> requests{0};
     std::atomic<uint64_t> queries{0};
+    std::atomic<uint64_t> active_requests{0};
+    std::atomic<bool> draining{false};
     std::chrono::steady_clock::time_point started_at{std::chrono::steady_clock::now()};
 
     void before_handle(crow::request& request, crow::response& response, context& ctx);
     void after_handle(crow::request& request, crow::response& response, context& ctx);
+    bool WaitForIdle(std::chrono::milliseconds timeout);
+    void CompleteRequest(context& ctx);
 
    private:
     struct Bucket {
@@ -59,12 +52,14 @@ class ApiMiddleware {
     bool ConsumeToken(const std::string& client_ip);
     std::mutex buckets_mutex_;
     std::unordered_map<std::string, Bucket> buckets_;
+    std::mutex active_requests_mutex_;
+    std::condition_variable active_requests_changed_;
     std::atomic<uint64_t> next_request_id_{1};
 };
 
 struct ApiServer::Impl {
     Impl(std::shared_ptr<BufferPoolManager> buffer_pool, std::shared_ptr<IDiskManager> disk,
-         std::shared_ptr<Executor> query_executor, std::string static_path);
+         std::shared_ptr<Executor> query_executor, std::string static_path, Config service_config);
 
     void RegisterRoutes();
 
@@ -82,7 +77,6 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point previous_stats_at{};
 };
 
-ApiConfig LoadApiConfig();
 crow::response JsonResponse(int status, const crow::json::wvalue& value);
 crow::response ErrorResponse(int status, std::string code, std::string message,
                              const std::string& request_id, size_t line = 0, size_t column = 0,

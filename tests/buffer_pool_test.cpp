@@ -261,30 +261,32 @@ TEST(BufferPoolGuardTest, GuardsOwnPinsAndMoveWithoutLeaking) {
     EXPECT_NO_THROW(pool.AssertNoPinsHeld());
 }
 
-TEST(BufferPoolConfigTest, ValidatesFrameCountAndPolicyEnvironment) {
+TEST(BufferPoolConfigTest, LoadsFrameCountAndPolicyFromEnvironment) {
     TemporaryDatabase database;
     auto disk = std::make_shared<FileDiskManager>(database.String());
     {
         ScopedEnvironment frames("BUFFER_POOL_FRAMES", "15");
         try {
-            BufferPoolManager invalid(disk);
+            (void)relational_db::Config::LoadFromEnvironment();
             FAIL() << "Expected invalid frame-count configuration";
-        } catch (const DbError& error) {
-            EXPECT_EQ(error.Code(), ErrorCode::INVALID_ARGUMENT);
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("BUFFER_POOL_FRAMES"), std::string::npos);
         }
     }
     {
         ScopedEnvironment frames("BUFFER_POOL_FRAMES", "16");
-        BufferPoolManager valid(disk);
+        const relational_db::Config config = relational_db::Config::LoadFromEnvironment();
+        BufferPoolManager valid(static_cast<size_t>(config.buffer_pool_frames), disk,
+                                config.buffer_pool_policy);
         EXPECT_EQ(valid.PoolSize(), 16U);
     }
     {
         ScopedEnvironment policy("BUFFER_POOL_POLICY", "invalid");
         try {
-            BufferPoolManager invalid(16, disk);
+            (void)relational_db::Config::LoadFromEnvironment();
             FAIL() << "Expected invalid replacement-policy configuration";
-        } catch (const DbError& error) {
-            EXPECT_EQ(error.Code(), ErrorCode::INVALID_ARGUMENT);
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("BUFFER_POOL_POLICY"), std::string::npos);
         }
     }
 }

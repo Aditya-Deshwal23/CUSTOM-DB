@@ -1,0 +1,52 @@
+{
+  "audited_at": "2026-10-31T11:54:25.372495+00:00",
+  "lighthouse_version": "13.6.0",
+  "engine_build": "b6322cefda07",
+  "scores_percent": {
+    "performance": 100,
+    "accessibility": 100
+  },
+  "metrics_and_accessibility_audits": {
+    "first-contentful-paint": {
+      "score": 0.99,
+      "display_value": "1.2\u00a0s"
+    },
+    "largest-contentful-paint": {
+      "score": 1,
+      "display_value": "1.2\u00a0s"
+    },
+    "speed-index": {
+      "score": 1,
+      "display_value": "1.2\u00a0s"
+    },
+    "total-blocking-time": {
+      "score": 1,
+      "display_value": "0\u00a0ms"
+    },
+    "cumulative-layout-shift": {
+      "score": 1,
+      "display_value": "0.017"
+    },
+    "interactive": {
+      "score": 1,
+      "display_value": "1.2\u00a0s"
+    },
+    "color-contrast": {
+      "score": 1,
+      "display_value": ""
+    },
+    "label": {
+      "score": 1,
+      "display_value": ""
+    },
+    "button-name": {
+      "score": 1,
+      "display_value": ""
+    },
+    "document-title": {
+      "score": 1,
+      "display_value": ""
+    }
+  },
+  "threshold_percent": 90
+}
