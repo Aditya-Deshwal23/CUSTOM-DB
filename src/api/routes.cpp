@@ -4,29 +4,29 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <utility>
 
 #include "internal.h"
+#include "metrics/metrics.h"
+
+#if defined(__linux__) || defined(__APPLE__)
+#include <dirent.h>
+#include <unistd.h>
+#endif
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 namespace relational_db {
 namespace {
-
-struct QueryTiming {
-    explicit QueryTiming(ApiMiddleware& api_middleware)
-        : middleware(api_middleware), start(std::chrono::steady_clock::now()) {}
-    ~QueryTiming() {
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - start)
-                                 .count();
-        middleware.query_latency_us.fetch_add(static_cast<uint64_t>(std::max<int64_t>(elapsed, 0)),
-                                              std::memory_order_relaxed);
-    }
-
-    ApiMiddleware& middleware;
-    std::chrono::steady_clock::time_point start;
-};
 
 bool EqualsIgnoreCase(std::string_view left, std::string_view right) {
     if (left.size() != right.size()) {
@@ -53,6 +53,20 @@ bool IsWrite(SqlStatementKind kind) {
 
 std::string ErrorCodeName(const DbError& error) {
     switch (error.Code()) {
+        case ErrorCode::INVALID_DB_FILE:
+            return "INVALID_DB_FILE";
+        case ErrorCode::UNSUPPORTED_VERSION:
+            return "UNSUPPORTED_VERSION";
+        case ErrorCode::HEADER_CORRUPT:
+            return "HEADER_CORRUPT";
+        case ErrorCode::PAGE_CHECKSUM_MISMATCH:
+            return "PAGE_CHECKSUM_MISMATCH";
+        case ErrorCode::PAGE_OUT_OF_RANGE:
+            return "PAGE_OUT_OF_RANGE";
+        case ErrorCode::PAGE_CORRUPT:
+            return "PAGE_CORRUPT";
+        case ErrorCode::BUFFER_POOL_EXHAUSTED:
+            return "BUFFER_POOL_EXHAUSTED";
         case ErrorCode::UNKNOWN_TABLE:
             return "UNKNOWN_TABLE";
         case ErrorCode::UNKNOWN_COLUMN:
@@ -67,8 +81,12 @@ std::string ErrorCodeName(const DbError& error) {
             return "FK_VIOLATION";
         case ErrorCode::BUSY:
             return "BUSY";
-        case ErrorCode::BUFFER_POOL_EXHAUSTED:
-            return "BUSY";
+        case ErrorCode::INVALID_TUPLE:
+            return "INVALID_TUPLE";
+        case ErrorCode::TUPLE_TOO_LARGE:
+            return "TUPLE_TOO_LARGE";
+        case ErrorCode::TXN_TOO_LARGE:
+            return "TXN_TOO_LARGE";
         case ErrorCode::QUERY_TIMEOUT:
             return "QUERY_TIMEOUT";
         case ErrorCode::RESULT_LIMIT_EXCEEDED:
@@ -233,7 +251,6 @@ std::string ColumnTypeName(ColumnType type) {
 crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request, bool legacy) {
     ApiMiddleware& api_middleware = server.app.get_middleware<ApiMiddleware>();
     api_middleware.queries.fetch_add(1, std::memory_order_relaxed);
-    QueryTiming query_timing(api_middleware);
     ApiMiddleware::context& context = RequestContext(server.app, request);
     const std::string& request_id = context.request_id;
     const auto fail = [legacy, &request_id](int status, const std::string& code,
@@ -252,6 +269,13 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
         }
         if (status == 503) {
             response.add_header("Retry-After", "1");
+        }
+        if (legacy) {
+            MetricsRegistry& metrics = MetricsRegistry::Instance();
+            metrics.RecordError(MetricErrorFromCode(code));
+            if (code == "BUSY" || code == "BUFFER_POOL_EXHAUSTED") {
+                metrics.busy_rejections.Increment();
+            }
         }
         return response;
     };
@@ -349,7 +373,24 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
     if (legacy) {
         try {
             crow::json::wvalue response;
+            const auto started = std::chrono::steady_clock::now();
             const std::string result = server.executor->ExecuteQuery(bound_sql);
+            const uint64_t elapsed = static_cast<uint64_t>(
+                std::max<int64_t>(
+                    0, std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - started)
+                           .count()));
+            if (server.config.slow_query_ms != 0U &&
+                elapsed >= server.config.slow_query_ms * 1000U) {
+                crow::json::wvalue slow_log;
+                slow_log["event"] = "slow_query";
+                slow_log["request_id"] = request_id;
+                slow_log["statement"] = SqlStatementName(statement.kind);
+                slow_log["elapsed_us"] = elapsed;
+                slow_log["sql"] = bound_sql;
+                slow_log["plan"] = "(no execution plan for legacy statement)";
+                std::clog << slow_log.dump() << '\n';
+            }
             if (result.rfind("Syntax error:", 0) == 0 || result.rfind("Unknown command.", 0) == 0) {
                 return fail(400, "SYNTAX_ERROR", result);
             }
@@ -375,6 +416,18 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
             std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::microseconds>(
                                      std::chrono::steady_clock::now() - started)
                                      .count()));
+        if (server.config.slow_query_ms != 0U &&
+            elapsed >= server.config.slow_query_ms * 1000U) {
+            crow::json::wvalue slow_log;
+            slow_log["event"] = "slow_query";
+            slow_log["request_id"] = request_id;
+            slow_log["statement"] = SqlStatementName(statement.kind);
+            slow_log["elapsed_us"] = elapsed;
+            slow_log["sql"] = bound_sql;
+            slow_log["plan"] = result.plan.empty() ? "(no execution plan for this statement)"
+                                                   : result.plan;
+            std::clog << slow_log.dump() << '\n';
+        }
         const size_t result_limit = static_cast<size_t>(server.config.max_result_rows);
         const bool truncated = result.rows.size() > result_limit;
         if (truncated) {
@@ -420,6 +473,114 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
     } catch (const std::exception&) {
         return fail(500, "INTERNAL", "Internal server error");
     }
+}
+
+#if defined(__linux__) || defined(__APPLE__)
+std::optional<uint64_t> ProcessRssBytes() {
+#if defined(__linux__)
+    std::ifstream status("/proc/self/statm");
+    uint64_t virtual_pages = 0;
+    uint64_t resident_pages = 0;
+    if (!(status >> virtual_pages >> resident_pages)) {
+        return std::nullopt;
+    }
+    const long page_size = sysconf(_SC_PAGESIZE);
+    return page_size > 0
+               ? std::optional<uint64_t>(resident_pages * static_cast<uint64_t>(page_size))
+               : std::nullopt;
+#elif defined(__APPLE__)
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    const kern_return_t result =
+        task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count);
+    return result == KERN_SUCCESS ? std::optional<uint64_t>(info.resident_size) : std::nullopt;
+#endif
+}
+
+std::optional<uint64_t> ProcessOpenFileDescriptors() {
+#if defined(__linux__) || defined(__APPLE__)
+    struct DirectoryCloser {
+        void operator()(DIR* directory) const noexcept {
+            if (directory != nullptr) {
+                closedir(directory);
+            }
+        }
+    };
+    std::unique_ptr<DIR, DirectoryCloser> directory(opendir("/dev/fd"));
+    if (!directory) {
+        return std::nullopt;
+    }
+    uint64_t count = 0;
+    while (readdir(directory.get()) != nullptr) {
+        ++count;
+    }
+    return count >= 3U ? std::optional<uint64_t>(count - 3U) : std::nullopt;
+}
+#endif
+#endif
+
+uint64_t SumStatementCounts(const MetricsRegistry& metrics) {
+    uint64_t count = 0;
+    for (const Counter& statement : metrics.statements) {
+        count += statement.Value();
+    }
+    return count;
+}
+
+HistogramSnapshot CombinedStatementDuration(const MetricsRegistry& metrics) {
+    HistogramSnapshot combined;
+    for (const Histogram& histogram : metrics.statement_duration_us) {
+        const HistogramSnapshot snapshot = histogram.Snapshot();
+        combined.sum += snapshot.sum;
+        combined.count += snapshot.count;
+        for (size_t index = 0; index < combined.buckets.size(); ++index) {
+            combined.buckets[index] += snapshot.buckets[index];
+        }
+    }
+    return combined;
+}
+
+void AppendPrometheusHistogram(std::ostringstream& output, std::string_view name,
+                               std::string_view help, const HistogramSnapshot& snapshot,
+                               std::string_view label_name = {},
+                               std::string_view label_value = {}, bool include_header = true) {
+    if (include_header) {
+        output << "# HELP " << name << ' ' << help << '\n'
+               << "# TYPE " << name << " histogram\n";
+    }
+    uint64_t cumulative = 0;
+    for (size_t index = 0; index + 1U < snapshot.buckets.size(); ++index) {
+        cumulative += snapshot.buckets[index];
+        const uint64_t upper_bound = uint64_t{1} << index;
+        output << name << "_bucket{";
+        if (!label_name.empty()) {
+            output << label_name << "=\"" << label_value << "\",";
+        }
+        output << "le=\"" << upper_bound << "\"} " << cumulative << '\n';
+    }
+    output << name << "_bucket{";
+    if (!label_name.empty()) {
+        output << label_name << "=\"" << label_value << "\",";
+    }
+    output << "le=\"+Inf\"} " << snapshot.count << '\n'
+           << name << "_sum";
+    if (!label_name.empty()) {
+        output << '{' << label_name << "=\"" << label_value << "\"}";
+    }
+    output << ' ' << snapshot.sum << '\n' << name << "_count";
+    if (!label_name.empty()) {
+        output << '{' << label_name << "=\"" << label_value << "\"}";
+    }
+    output << ' ' << snapshot.count << '\n';
+}
+
+void AddHistogramJson(crow::json::wvalue& target, const HistogramSnapshot& snapshot) {
+    target["count"] = snapshot.count;
+    target["sum_us"] = snapshot.sum;
+    target["p50_us"] = snapshot.P50();
+    target["p95_us"] = snapshot.P95();
+    target["p99_us"] = snapshot.P99();
 }
 
 }  // namespace
@@ -527,33 +688,187 @@ void ApiServer::Impl::RegisterRoutes() {
     CROW_ROUTE(app, "/api/v1/stats").methods(crow::HTTPMethod::GET)([this]() {
         const BufferPoolStats pool = bpm->SnapshotStats();
         const DiskStats disk = disk_manager->Stats();
+        MetricsRegistry& metrics = MetricsRegistry::Instance();
+        const auto now = std::chrono::steady_clock::now();
+        double hit_rate_window = 0.0;
+        double window_seconds = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(stats_window_mutex);
+            if (previous_stats_at.time_since_epoch().count() != 0) {
+                const uint64_t hit_delta =
+                    pool.hits >= previous_stats_hits ? pool.hits - previous_stats_hits : 0U;
+                const uint64_t miss_delta = pool.misses >= previous_stats_misses
+                                                ? pool.misses - previous_stats_misses
+                                                : 0U;
+                const uint64_t lookups = hit_delta + miss_delta;
+                hit_rate_window =
+                    lookups == 0U ? 0.0 : static_cast<double>(hit_delta) / lookups;
+                window_seconds =
+                    std::chrono::duration<double>(now - previous_stats_at).count();
+            }
+            previous_stats_hits = pool.hits;
+            previous_stats_misses = pool.misses;
+            previous_stats_at = now;
+        }
+
         crow::json::wvalue response;
+        response["uptime_seconds"] =
+            std::chrono::duration<double>(now - app.get_middleware<ApiMiddleware>().started_at)
+                .count();
+        response["demo_load"] = metrics.demo_load_active.Value() != 0;
+        response["buffer_pool"]["size"] = bpm->PoolSize();
         response["buffer_pool"]["hits"] = pool.hits;
         response["buffer_pool"]["misses"] = pool.misses;
         response["buffer_pool"]["evictions"] = pool.evictions;
         response["buffer_pool"]["dirty_write_backs"] = pool.dirty_write_backs;
         response["buffer_pool"]["waits"] = pool.waits;
         response["buffer_pool"]["pinned_frames"] = bpm->pinned_frames();
+        response["buffer_pool"]["hit_rate_window"] = hit_rate_window;
+        response["buffer_pool"]["hit_rate_window_seconds"] = window_seconds;
         response["disk"]["reads"] = disk.reads;
         response["disk"]["writes"] = disk.writes;
         response["disk"]["syncs"] = disk.syncs;
         response["disk"]["bytes"] = disk.bytes;
+        AddHistogramJson(response["disk"]["read_latency_us"], metrics.disk_read_us.Snapshot());
+        AddHistogramJson(response["disk"]["write_latency_us"], metrics.disk_write_us.Snapshot());
+        AddHistogramJson(response["disk"]["sync_latency_us"], metrics.disk_sync_us.Snapshot());
         response["requests"] =
             app.get_middleware<ApiMiddleware>().requests.load(std::memory_order_relaxed);
         response["queries"] =
             app.get_middleware<ApiMiddleware>().queries.load(std::memory_order_relaxed);
-        response["errors"] =
-            app.get_middleware<ApiMiddleware>().errors.load(std::memory_order_relaxed);
+        response["errors"] = metrics.ErrorCount();
+        response["rows_read"] = metrics.rows_read.Value();
+        response["rows_written"] = metrics.rows_written.Value();
+        response["index_scans"] = metrics.index_scans.Value();
+        response["sequential_scans"] = metrics.sequential_scans.Value();
+        response["active_statements"] = metrics.active_statements.Value();
+        response["statement_waiters"] = metrics.statement_waiters.Value();
+        response["rate_limited_requests"] = metrics.rate_limited_requests.Value();
+        response["busy_rejections"] = metrics.busy_rejections.Value();
+        crow::json::wvalue statements;
+        crow::json::wvalue statement_durations;
+        for (size_t index = 0; index < MetricsRegistry::kStatementLabels.size(); ++index) {
+            const std::string label(MetricsRegistry::kStatementLabels[index]);
+            statements[label] = metrics.statements[index].Value();
+            AddHistogramJson(statement_durations[label],
+                             metrics.statement_duration_us[index].Snapshot());
+        }
+        response["statements"] = std::move(statements);
+        response["statement_duration_us"] = std::move(statement_durations);
+        crow::json::wvalue http_requests;
+        for (size_t route = 0; route < MetricsRegistry::kHttpRouteLabels.size(); ++route) {
+            crow::json::wvalue statuses;
+            for (size_t status = 0; status < MetricsRegistry::kHttpStatusLabels.size(); ++status) {
+                statuses[std::string(MetricsRegistry::kHttpStatusLabels[status])] =
+                    metrics.http_requests[route][status].Value();
+            }
+            http_requests[std::string(MetricsRegistry::kHttpRouteLabels[route])] =
+                std::move(statuses);
+        }
+        response["http_requests"] = std::move(http_requests);
+        crow::json::wvalue errors;
+        for (size_t index = 0; index < MetricsRegistry::kErrorLabels.size(); ++index) {
+            errors[std::string(MetricsRegistry::kErrorLabels[index])] =
+                metrics.errors[index].Value();
+        }
+        response["errors_by_code"] = std::move(errors);
+        response["wal"]["bytes"] = metrics.wal_bytes.Value();
+        response["wal"]["commits"] = metrics.wal_commits.Value();
+        response["wal"]["sync_latency_us"]["count"] = metrics.wal_sync_us.Snapshot().count;
+        response["wal"]["sync_latency_us"]["sum_us"] = metrics.wal_sync_us.Snapshot().sum;
+        response["wal"]["checkpoints"] = metrics.checkpoints.Value();
+        AddHistogramJson(response["wal"]["checkpoint_duration_us"],
+                         metrics.checkpoint_duration_us.Snapshot());
+        AddHistogramJson(response["wal"]["recovery_duration_us"],
+                         metrics.recovery_duration_us.Snapshot());
+        response["wal"]["recovery_records"] = metrics.recovery_records.Value();
+        response["wal"]["recovery_ran"] = metrics.recovery_ran.Value() != 0;
+        if (WriteAheadLog* wal = executor->Wal()) {
+            response["wal"]["size_bytes"] = wal->SizeBytes();
+            response["wal"]["commit_count"] = wal->CommitCount();
+            response["wal"]["checkpoint_count"] = wal->CheckpointCount();
+            const uint64_t checkpoint_ms = wal->LastCheckpointUnixMs();
+            response["wal"]["last_checkpoint_unix_ms"] =
+                checkpoint_ms == 0U ? crow::json::wvalue(nullptr)
+                                    : crow::json::wvalue(checkpoint_ms);
+        }
+        const HistogramSnapshot request_latency = metrics.http_request_duration_us.Snapshot();
+        AddHistogramJson(response["http_request_duration_us"], request_latency);
+#if defined(__linux__) || defined(__APPLE__)
+        if (const auto rss_bytes = ProcessRssBytes()) {
+            response["process"]["rss_bytes"] = *rss_bytes;
+        }
+        if (const auto open_fds = ProcessOpenFileDescriptors()) {
+            response["process"]["open_fds"] = *open_fds;
+        }
+#endif
+        return JsonResponse(200, response);
+    });
+    CROW_ROUTE(app, "/api/v1/stats/buffer_pool")
+        .methods(crow::HTTPMethod::GET)([this]() {
+            const std::vector<FrameInfo> frames = bpm->Snapshot();
+            crow::json::wvalue response;
+            response["pool_size"] = bpm->PoolSize();
+            response["snapshot_size"] = frames.size();
+            response["pinned_frames"] = bpm->pinned_frames();
+            crow::json::wvalue::list frame_list;
+            frame_list.reserve(frames.size());
+            for (const FrameInfo& frame : frames) {
+                crow::json::wvalue item;
+                item["frame_id"] = frame.frame_id;
+                item["page_id"] = frame.page_id;
+                item["pin_count"] = frame.pin_count;
+                item["dirty"] = frame.dirty;
+                item["ref_bit"] = frame.ref_bit;
+                item["clock_hand"] = frame.clock_hand;
+                frame_list.push_back(std::move(item));
+            }
+            response["frames"] = std::move(frame_list);
+            return JsonResponse(200, response);
+        });
+    CROW_ROUTE(app, "/api/v1/stats/storage").methods(crow::HTTPMethod::GET)([this]() {
+        crow::json::wvalue response;
+        response["file_size_bytes"] = disk_manager->FileSizeBytes();
+        response["page_count"] = disk_manager->SizeInPages();
+        response["free_pages"] = bpm->FreePageCount();
+        WriteAheadLog* wal = executor->Wal();
+        if (wal != nullptr) {
+            response["wal_size_bytes"] = wal->SizeBytes();
+            response["checkpoint_count"] = wal->CheckpointCount();
+            const uint64_t last_checkpoint = wal->LastCheckpointUnixMs();
+            response["last_checkpoint_unix_ms"] =
+                last_checkpoint == 0U ? crow::json::wvalue(nullptr)
+                                     : crow::json::wvalue(last_checkpoint);
+            const WalRecoveryStats recovery = wal->LastRecoveryStats();
+            response["recovery"]["ran"] = recovery.ran;
+            response["recovery"]["records"] = recovery.records;
+            response["recovery"]["commits"] = recovery.commits;
+            response["recovery"]["pages_replayed"] = recovery.pages_replayed;
+            response["recovery"]["truncated_bytes"] = recovery.truncated_bytes;
+            response["recovery"]["duration_us"] = recovery.elapsed_us;
+        } else {
+            response["wal_size_bytes"] = 0;
+            response["checkpoint_count"] = 0;
+            response["last_checkpoint_unix_ms"] = crow::json::wvalue(nullptr);
+            response["recovery"]["ran"] = false;
+            response["recovery"]["records"] = 0;
+            response["recovery"]["commits"] = 0;
+            response["recovery"]["pages_replayed"] = 0;
+            response["recovery"]["truncated_bytes"] = 0;
+            response["recovery"]["duration_us"] = 0;
+        }
         return JsonResponse(200, response);
     });
     CROW_ROUTE(app, "/api/metrics").methods(crow::HTTPMethod::GET)([this]() {
         const BufferPoolStats stats = bpm->SnapshotStats();
-        const uint64_t queries =
-            app.get_middleware<ApiMiddleware>().queries.load(std::memory_order_relaxed);
-        const uint64_t elapsed =
-            app.get_middleware<ApiMiddleware>().query_latency_us.load(std::memory_order_relaxed);
-        const uint64_t errors =
-            app.get_middleware<ApiMiddleware>().errors.load(std::memory_order_relaxed);
+        const MetricsRegistry& metrics = MetricsRegistry::Instance();
+        const uint64_t queries = SumStatementCounts(metrics);
+        const HistogramSnapshot latency = CombinedStatementDuration(metrics);
+        HistogramSnapshot io_latency = metrics.disk_read_us.Snapshot();
+        const HistogramSnapshot write_latency = metrics.disk_write_us.Snapshot();
+        const HistogramSnapshot sync_latency = metrics.disk_sync_us.Snapshot();
+        io_latency.sum += write_latency.sum + sync_latency.sum;
+        io_latency.count += write_latency.count + sync_latency.count;
         const uint64_t lookups = stats.hits + stats.misses;
         crow::json::wvalue response;
         response["cache_hit_rate"] =
@@ -565,8 +880,15 @@ void ApiServer::Impl::RegisterRoutes() {
         response["query_throughput"] =
             uptime_seconds > 0.0 ? static_cast<double>(queries) / uptime_seconds : 0.0;
         response["avg_latency"] =
-            queries == 0U ? 0.0 : static_cast<double>(elapsed) / queries / 1000.0;
-        response["error_count"] = errors;
+            latency.count == 0U ? 0.0
+                                : static_cast<double>(latency.sum) / latency.count / 1000.0;
+        response["avg_io_latency"] =
+            io_latency.count == 0U
+                ? 0.0
+                : static_cast<double>(io_latency.sum) / io_latency.count / 1000.0;
+        response["active_latches"] = metrics.active_statements.Value();
+        response["active_statements"] = metrics.active_statements.Value();
+        response["error_count"] = metrics.ErrorCount();
         response["source"] = "live";
         response["deprecated"] = true;
         return JsonResponse(200, response);
@@ -575,31 +897,158 @@ void ApiServer::Impl::RegisterRoutes() {
         const BufferPoolStats pool = bpm->SnapshotStats();
         const DiskStats disk = disk_manager->Stats();
         const ApiMiddleware& middleware = app.get_middleware<ApiMiddleware>();
+        const MetricsRegistry& metrics = MetricsRegistry::Instance();
         std::ostringstream text;
-        text << "# HELP reldb_buffer_pool_hits_total Buffer pool cache hits.\n"
+        text << std::setprecision(17);
+        text << "# HELP reldb_http_requests_total HTTP requests by route and status.\n"
+             << "# TYPE reldb_http_requests_total counter\n";
+        for (size_t route = 0; route < MetricsRegistry::kHttpRouteLabels.size(); ++route) {
+            for (size_t status = 0; status < MetricsRegistry::kHttpStatusLabels.size(); ++status) {
+                text << "reldb_http_requests_total{route=\""
+                     << MetricsRegistry::kHttpRouteLabels[route] << "\",status=\""
+                     << MetricsRegistry::kHttpStatusLabels[status] << "\"} "
+                     << metrics.http_requests[route][status].Value() << '\n';
+            }
+        }
+        text << "# HELP reldb_statements_total SQL statements by type.\n"
+             << "# TYPE reldb_statements_total counter\n";
+        for (size_t index = 0; index < MetricsRegistry::kStatementLabels.size(); ++index) {
+            text << "reldb_statements_total{type=\"" << MetricsRegistry::kStatementLabels[index]
+                 << "\"} " << metrics.statements[index].Value() << '\n';
+            AppendPrometheusHistogram(
+                text, "reldb_statement_duration_us",
+                "SQL statement duration in microseconds.",
+                metrics.statement_duration_us[index].Snapshot(), "type",
+                MetricsRegistry::kStatementLabels[index], index == 0U);
+        }
+        text << "# HELP reldb_rows_read_total Rows fetched by table scans and point lookups.\n"
+             << "# TYPE reldb_rows_read_total counter\n"
+             << "reldb_rows_read_total " << metrics.rows_read.Value() << '\n'
+             << "# HELP reldb_rows_written_total Rows affected by write statements.\n"
+             << "# TYPE reldb_rows_written_total counter\n"
+             << "reldb_rows_written_total " << metrics.rows_written.Value() << '\n'
+             << "# HELP reldb_plan_scans_total Query plan scans by type.\n"
+             << "# TYPE reldb_plan_scans_total counter\n"
+             << "reldb_plan_scans_total{type=\"index\"} " << metrics.index_scans.Value() << '\n'
+             << "reldb_plan_scans_total{type=\"seq\"} " << metrics.sequential_scans.Value() << '\n'
+             << "# HELP reldb_errors_total SQL and API failures by error code.\n"
+             << "# TYPE reldb_errors_total counter\n";
+        for (size_t index = 0; index < MetricsRegistry::kErrorLabels.size(); ++index) {
+            text << "reldb_errors_total{code=\"" << MetricsRegistry::kErrorLabels[index] << "\"} "
+                 << metrics.errors[index].Value() << '\n';
+        }
+        text << "# HELP reldb_rejected_requests_total Requests rejected by admission controls.\n"
+             << "# TYPE reldb_rejected_requests_total counter\n"
+             << "reldb_rejected_requests_total{reason=\"rate_limit\"} "
+             << metrics.rate_limited_requests.Value() << '\n'
+             << "reldb_rejected_requests_total{reason=\"busy\"} "
+             << metrics.busy_rejections.Value() << '\n'
+             << "# HELP reldb_buffer_pool_hits_total Buffer pool cache hits.\n"
              << "# TYPE reldb_buffer_pool_hits_total counter\n"
              << "reldb_buffer_pool_hits_total " << pool.hits << '\n'
              << "# HELP reldb_buffer_pool_misses_total Buffer pool cache misses.\n"
              << "# TYPE reldb_buffer_pool_misses_total counter\n"
              << "reldb_buffer_pool_misses_total " << pool.misses << '\n'
-             << "# HELP reldb_disk_reads_total Disk page reads.\n"
+             << "# HELP reldb_buffer_pool_evictions_total Buffer pool evictions.\n"
+             << "# TYPE reldb_buffer_pool_evictions_total counter\n"
+             << "reldb_buffer_pool_evictions_total " << pool.evictions << '\n'
+             << "# HELP reldb_buffer_pool_dirty_write_backs_total Dirty pages written back.\n"
+             << "# TYPE reldb_buffer_pool_dirty_write_backs_total counter\n"
+             << "reldb_buffer_pool_dirty_write_backs_total " << pool.dirty_write_backs << '\n'
+             << "# HELP reldb_buffer_pool_waits_total Buffer pool waits.\n"
+             << "# TYPE reldb_buffer_pool_waits_total counter\n"
+             << "reldb_buffer_pool_waits_total " << pool.waits << '\n'
+             << "# HELP reldb_buffer_pool_pinned_frames Current pinned frames.\n"
+             << "# TYPE reldb_buffer_pool_pinned_frames gauge\n"
+             << "reldb_buffer_pool_pinned_frames " << bpm->pinned_frames() << '\n'
+             << "# HELP reldb_disk_reads_total Database page reads.\n"
              << "# TYPE reldb_disk_reads_total counter\n"
              << "reldb_disk_reads_total " << disk.reads << '\n'
-             << "# HELP reldb_disk_writes_total Disk page writes.\n"
+             << "# HELP reldb_disk_writes_total Database page writes.\n"
              << "# TYPE reldb_disk_writes_total counter\n"
              << "reldb_disk_writes_total " << disk.writes << '\n'
-             << "# HELP reldb_http_requests_total HTTP requests handled.\n"
-             << "# TYPE reldb_http_requests_total counter\n"
-             << "reldb_http_requests_total " << middleware.requests.load(std::memory_order_relaxed)
+             << "# HELP reldb_disk_syncs_total Database sync operations.\n"
+             << "# TYPE reldb_disk_syncs_total counter\n"
+             << "reldb_disk_syncs_total " << disk.syncs << '\n'
+             << "# HELP reldb_disk_bytes_total Database I/O bytes.\n"
+             << "# TYPE reldb_disk_bytes_total counter\n"
+             << "reldb_disk_bytes_total " << disk.bytes << '\n';
+        AppendPrometheusHistogram(text, "reldb_disk_read_duration_us",
+                                  "Database read latency in microseconds.",
+                                  metrics.disk_read_us.Snapshot());
+        AppendPrometheusHistogram(text, "reldb_disk_write_duration_us",
+                                  "Database write latency in microseconds.",
+                                  metrics.disk_write_us.Snapshot());
+        AppendPrometheusHistogram(text, "reldb_disk_sync_duration_us",
+                                  "Database sync latency in microseconds.",
+                                  metrics.disk_sync_us.Snapshot());
+        AppendPrometheusHistogram(text, "reldb_http_request_duration_us",
+                                  "HTTP request duration in microseconds.",
+                                  metrics.http_request_duration_us.Snapshot());
+        AppendPrometheusHistogram(text, "reldb_statement_gate_wait_duration_us",
+                                  "Statement gate wait duration in microseconds.",
+                                  metrics.gate_wait_us.Snapshot());
+        text << "# HELP reldb_statement_gate_active Current active statements.\n"
+             << "# TYPE reldb_statement_gate_active gauge\n"
+             << "reldb_statement_gate_active " << metrics.active_statements.Value() << '\n'
+             << "# HELP reldb_statement_gate_waiters Current queued statements.\n"
+             << "# TYPE reldb_statement_gate_waiters gauge\n"
+             << "reldb_statement_gate_waiters " << metrics.statement_waiters.Value() << '\n'
+             << "# HELP reldb_wal_bytes_total WAL bytes appended.\n"
+             << "# TYPE reldb_wal_bytes_total counter\n"
+             << "reldb_wal_bytes_total " << metrics.wal_bytes.Value() << '\n'
+             << "# HELP reldb_wal_commits_total WAL commits.\n"
+             << "# TYPE reldb_wal_commits_total counter\n"
+             << "reldb_wal_commits_total " << metrics.wal_commits.Value() << '\n';
+        AppendPrometheusHistogram(text, "reldb_wal_sync_duration_us",
+                                  "WAL fsync latency in microseconds.",
+                                  metrics.wal_sync_us.Snapshot());
+        text << "# HELP reldb_checkpoints_total Completed checkpoints.\n"
+             << "# TYPE reldb_checkpoints_total counter\n"
+             << "reldb_checkpoints_total " << metrics.checkpoints.Value() << '\n';
+        if (WriteAheadLog* wal = executor->Wal()) {
+            text << "# HELP reldb_wal_size_bytes Current WAL file size in bytes.\n"
+                 << "# TYPE reldb_wal_size_bytes gauge\n"
+                 << "reldb_wal_size_bytes " << wal->SizeBytes() << '\n'
+                 << "# HELP reldb_last_checkpoint_unix_ms Last completed checkpoint timestamp.\n"
+                 << "# TYPE reldb_last_checkpoint_unix_ms gauge\n"
+                 << "reldb_last_checkpoint_unix_ms " << wal->LastCheckpointUnixMs() << '\n';
+        }
+        AppendPrometheusHistogram(text, "reldb_checkpoint_duration_us",
+                                  "Checkpoint duration in microseconds.",
+                                  metrics.checkpoint_duration_us.Snapshot());
+        text << "# HELP reldb_recovery_records_total WAL records processed during recovery.\n"
+             << "# TYPE reldb_recovery_records_total counter\n"
+             << "reldb_recovery_records_total " << metrics.recovery_records.Value() << '\n';
+        AppendPrometheusHistogram(text, "reldb_recovery_duration_us",
+                                  "Recovery duration in microseconds.",
+                                  metrics.recovery_duration_us.Snapshot());
+        text << "# HELP reldb_uptime_seconds Process uptime in seconds.\n"
+             << "# TYPE reldb_uptime_seconds gauge\n"
+             << "reldb_uptime_seconds "
+             << std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                              middleware.started_at)
+                    .count()
              << '\n'
-             << "# HELP reldb_http_errors_total HTTP error responses.\n"
-             << "# TYPE reldb_http_errors_total counter\n"
-             << "reldb_http_errors_total " << middleware.errors.load(std::memory_order_relaxed)
-             << '\n'
-             << "# HELP reldb_api_queries_total API SQL query requests.\n"
-             << "# TYPE reldb_api_queries_total counter\n"
-             << "reldb_api_queries_total " << middleware.queries.load(std::memory_order_relaxed)
+             << "# HELP reldb_recovery_ran Whether WAL recovery completed during this process.\n"
+             << "# TYPE reldb_recovery_ran gauge\n"
+             << "reldb_recovery_ran " << (metrics.recovery_ran.Value() != 0 ? 1 : 0) << '\n'
+             << "# HELP reldb_demo_load_active Whether the optional demo workload is active.\n"
+             << "# TYPE reldb_demo_load_active gauge\n"
+             << "reldb_demo_load_active " << (metrics.demo_load_active.Value() != 0 ? 1 : 0)
              << '\n';
+#if defined(__linux__) || defined(__APPLE__)
+        if (const auto rss_bytes = ProcessRssBytes()) {
+            text << "# HELP reldb_process_rss_bytes Resident set size in bytes.\n"
+                 << "# TYPE reldb_process_rss_bytes gauge\n"
+                 << "reldb_process_rss_bytes " << *rss_bytes << '\n';
+        }
+        if (const auto open_fds = ProcessOpenFileDescriptors()) {
+            text << "# HELP reldb_process_open_fds Current open file descriptors.\n"
+                 << "# TYPE reldb_process_open_fds gauge\n"
+                 << "reldb_process_open_fds " << *open_fds << '\n';
+        }
+#endif
         crow::response response(text.str());
         response.add_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
         return response;

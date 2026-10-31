@@ -80,6 +80,7 @@ endif()
 find_package(Threads REQUIRED)
 
 add_library(reldb_core STATIC
+  src/metrics/metrics.cpp
   src/crc32c.cpp
   src/disk_manager.cpp
   src/concurrency.cpp
@@ -116,6 +117,7 @@ target_sources(relational_db PRIVATE
   src/api/routes.cpp
   src/api/middleware.cpp
   src/api/json.cpp
+  src/demo/load_generator.cpp
 )
 target_include_directories(relational_db PRIVATE include)
 target_include_directories(relational_db SYSTEM PRIVATE
@@ -167,6 +169,7 @@ if(RELDB_BUILD_TESTS)
     tests/storage_test.cpp
     tests/sql_parser_test.cpp
     tests/sql_execution_test.cpp
+    tests/metrics_test.cpp
   )
   target_compile_definitions(reldb_regression_tests PRIVATE
     RELDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -197,6 +200,8 @@ if(RELDB_BUILD_BENCHMARKS)
   target_link_libraries(reldb_sql_execution_benchmarks PRIVATE reldb_core)
   add_executable(reldb_concurrency_benchmarks bench/concurrency_bench.cpp)
   target_link_libraries(reldb_concurrency_benchmarks PRIVATE reldb_core Threads::Threads)
+  add_executable(reldb_metrics_overhead_benchmarks bench/metrics_overhead_bench.cpp)
+  target_link_libraries(reldb_metrics_overhead_benchmarks PRIVATE reldb_core benchmark::benchmark)
 endif()
 
 set(project_targets reldb_core relational_db)
@@ -208,6 +213,7 @@ if(RELDB_BUILD_BENCHMARKS)
   list(APPEND project_targets reldb_benchmarks reldb_disk_benchmarks reldb_buffer_pool_benchmarks
        reldb_storage_benchmarks reldb_wal_benchmarks reldb_sql_execution_benchmarks)
   list(APPEND project_targets reldb_concurrency_benchmarks)
+  list(APPEND project_targets reldb_metrics_overhead_benchmarks)
 endif()
 foreach(target IN LISTS project_targets)
   reldb_configure_project_target(${target})

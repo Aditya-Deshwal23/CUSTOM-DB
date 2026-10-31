@@ -33,11 +33,13 @@ struct PageBeforeImage {
 };
 
 struct WalRecoveryStats {
+    bool ran{false};
     uint64_t records{0};
     uint64_t commits{0};
     uint64_t pages_replayed{0};
     uint64_t truncated_bytes{0};
     uint64_t elapsed_ms{0};
+    uint64_t elapsed_us{0};
 };
 
 class TxnContext {
@@ -99,6 +101,10 @@ class WriteAheadLog {
         return log_count_;
     }
     uint64_t SizeBytes() const;
+    uint64_t CommitCount() const;
+    uint64_t CheckpointCount() const;
+    uint64_t LastCheckpointUnixMs() const;
+    WalRecoveryStats LastRecoveryStats() const;
     DurabilityMode Mode() const noexcept {
         return mode_;
     }
@@ -127,6 +133,10 @@ class WriteAheadLog {
     uint64_t next_txn_id_{1};
     uint64_t log_count_{0};
     uint64_t file_size_{0};
+    uint64_t commit_count_{0};
+    uint64_t checkpoint_count_{0};
+    uint64_t last_checkpoint_unix_ms_{0};
+    WalRecoveryStats recovery_stats_{};
     std::chrono::steady_clock::time_point last_sync_;
     bool recovered_{false};
     bool stop_sync_thread_{false};

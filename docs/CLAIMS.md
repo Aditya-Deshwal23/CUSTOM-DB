@@ -62,9 +62,19 @@
 | Executor serializes writers and permits concurrent readers without data races | verified | `ConcurrencyTest.ExecutorStatementGateTsanClean`; `ConcurrencyTest.ReaderWriterTsanClean`; CI TSan job |
 | Point-SELECT scaling and 95/5 read/write p50/p99 latency are measured | verified | `reldb_concurrency_benchmarks`; `docs/benchmarks.md` records the measured host and run |
 | API and Prometheus metrics use live buffer-pool, disk, and HTTP counters | verified | `tests/api/test_api.py` exercises `/api/v1/stats`, `/metrics`, and the deprecated `/api/metrics` alias |
-| The dashboard reports real active latch counts and disk-I/O latency | removed | `active_latches` and derived I/O latency are not exposed; dashboard simulation uses a persistent warning |
+| SQL statement counters, row counts, errors, and execution histograms reflect real executor events | verified | `MetricsTest.SqlEventsUpdateExactStatementAndRowCounters`; API exact deltas in `test_sql_result_parameters_tables_and_stats`; `MetricsTest.NoFabricatedValues` |
+| Buffer-pool miss/hit counters reflect cold and warm page fetches | verified | `MetricsTest.BufferPoolSeparatesColdMissesFromWarmHits` asserts 10 cold misses followed by 10 warm hits |
+| Metrics counters sum exactly under eight concurrent writers | verified | `MetricsTest.ConcurrentCounterUpdatesAreExact`; the test prints its seed and is included in the TSan regression target |
+| Prometheus exposition has unique HELP/TYPE declarations and parses as 0.0.4 | verified | `tests/api/test_api.py::test_rate_limit_and_prometheus_metrics` parses the live endpoint using `prometheus_client.parser` |
+| Legacy metrics fields use live latency, hit, error, and active-statement values | verified | `tests/api/test_api.py::test_legacy_aliases_keep_deprecated_shapes`; `active_latches` equals `active_statements` |
+| The optional demo workload defaults off and uses the normal executor when enabled | verified | `tests/api/test_api.py::test_demo_load_is_opt_in_and_uses_statement_counters`; `src/demo/load_generator.cpp` |
+| Slow-query logging is configurable and includes the executed SQL and plan | verified | `tests/api/test_api.py::test_slow_query_log_includes_executed_plan`; API suite is run by `.github/workflows/ci.yml` |
 | Dashboard schema and execution trace represent a live catalog/backend trace | removed | `README.md`; the simulation trace is explicitly illustrative |
 | The dashboard uses no random-number calls to fabricate metrics | verified | CI's `Check metrics honesty` step runs `MetricsTest.NoFabricatedValues`; `scripts/run_known_bugs.sh` reports it |
+| Prometheus includes live HTTP, statement, storage, WAL, gate, and process metrics | verified | `tests/api/test_api.py` parses `/metrics`; `MetricsTest.SqlEventsUpdateExactStatementAndRowCounters`; `MetricsTest.BufferPoolSeparatesColdMissesFromWarmHits` |
+| Stats endpoints expose buffer-pool frames and current storage/recovery summaries | verified | `tests/api/test_api.py` exercises `/api/v1/stats/buffer_pool` and `/api/v1/stats/storage` |
+| Metrics hot-path updates allocate nothing and avoid a registry mutex | verified | fixed-label atomic implementation in `include/metrics/metrics.h`; `MetricsTest.LabelsAreStableAndAllocationFreeToSelect`; `docs/CONCURRENCY.md` |
+| Metrics update overhead on point SELECT remains below 3% | verified | `reldb_metrics_overhead_benchmarks`; the Release run recorded in `docs/benchmarks.md` measured 1.28% CPU-time overhead |
 | SQL benchmark timings are performance guarantees | removed | `docs/benchmarks.md` labels local measurements as observations, not CI thresholds |
 | The project is high-performance, production-grade, or general-purpose ACID | removed | The engine supports single-writer, statement-atomic redo recovery; it does not implement general SQL transaction isolation |
 | The versioned API exposes query, metadata, stats, Prometheus, version, liveness, readiness, and checkpoint routes | verified | `tests/api/test_api.py`; `docs/openapi.yaml`; CI API contract step |

@@ -864,6 +864,7 @@ TEST(MetricsTest, NoFabricatedValues) {
                                       std::istreambuf_iterator<char>());
             EXPECT_EQ(content.find("rand("), std::string::npos) << entry.path();
             EXPECT_EQ(content.find("Math.random"), std::string::npos) << entry.path();
+            EXPECT_EQ(content.find("avg_latency / 3.0"), std::string::npos) << entry.path();
         }
     }
 }

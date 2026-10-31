@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <charconv>
 #include <csignal>
 #include <cstddef>
@@ -17,6 +18,7 @@
 #include "buffer_pool_manager.h"
 #include "crc32c.h"
 #include "db_error.h"
+#include "metrics/metrics.h"
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -467,6 +469,26 @@ uint64_t WriteAheadLog::SizeBytes() const {
     return file_size_;
 }
 
+uint64_t WriteAheadLog::CommitCount() const {
+    std::lock_guard<RankedMutex> lock(latch_);
+    return commit_count_;
+}
+
+uint64_t WriteAheadLog::CheckpointCount() const {
+    std::lock_guard<RankedMutex> lock(latch_);
+    return checkpoint_count_;
+}
+
+uint64_t WriteAheadLog::LastCheckpointUnixMs() const {
+    std::lock_guard<RankedMutex> lock(latch_);
+    return last_checkpoint_unix_ms_;
+}
+
+WalRecoveryStats WriteAheadLog::LastRecoveryStats() const {
+    std::lock_guard<RankedMutex> lock(latch_);
+    return recovery_stats_;
+}
+
 uint64_t WriteAheadLog::GetFirstUnsyncedLSN() const {
     std::lock_guard<RankedMutex> lock(latch_);
     return durable_lsn_;
@@ -538,6 +560,7 @@ std::vector<uint64_t> WriteAheadLog::Commit(uint64_t txn_id, const std::vector<C
 
     WriteFullyAt(file_descriptor_, file_size_, batch.data(), batch.size());
     file_size_ += batch.size();
+    MetricsRegistry::Instance().wal_bytes.Add(static_cast<uint64_t>(batch.size()));
     log_count_ += pages.size() + 1U;
     next_lsn_ = lsn;
     next_txn_id_ = std::max(next_txn_id_, txn_id + 1U);
@@ -550,13 +573,19 @@ std::vector<uint64_t> WriteAheadLog::Commit(uint64_t txn_id, const std::vector<C
         throw;
     }
     durable_lsn_ = next_lsn_;
+    MetricsRegistry::Instance().wal_commits.Increment();
+    ++commit_count_;
     FailPoint::Hit("wal_fsync_after");
     return page_lsns;
 }
 
 void WriteAheadLog::Sync() {
+    const auto started = std::chrono::steady_clock::now();
     SyncDescriptor(file_descriptor_);
     last_sync_ = std::chrono::steady_clock::now();
+    const uint64_t elapsed_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(last_sync_ - started).count());
+    MetricsRegistry::Instance().wal_sync_us.Observe(elapsed_us);
 }
 
 WalRecoveryStats WriteAheadLog::Recover(IDiskManager& disk_manager) {
@@ -667,9 +696,16 @@ WalRecoveryStats WriteAheadLog::Recover(IDiskManager& disk_manager) {
     next_txn_id_ = std::max(next_txn_id_, max_txn_id + 1U);
     log_count_ = 0;
     recovered_ = true;
-    stats.elapsed_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                 std::chrono::steady_clock::now() - started)
-                                                 .count());
+    stats.ran = true;
+    stats.elapsed_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started)
+            .count());
+    stats.elapsed_ms = stats.elapsed_us / 1000U;
+    recovery_stats_ = stats;
+    MetricsRegistry::Instance().recovery_ran.Set(1);
+    MetricsRegistry::Instance().recovery_records.Add(stats.records);
+    MetricsRegistry::Instance().recovery_duration_us.Observe(stats.elapsed_us);
     std::clog << "[WAL] recovery records=" << stats.records << " commits=" << stats.commits
               << " pages_replayed=" << stats.pages_replayed
               << " truncated_bytes=" << stats.truncated_bytes << " ms=" << stats.elapsed_ms << '\n';
@@ -678,6 +714,7 @@ WalRecoveryStats WriteAheadLog::Recover(IDiskManager& disk_manager) {
 }
 
 void WriteAheadLog::Checkpoint(BufferPoolManager& buffer_pool) {
+    const auto started = std::chrono::steady_clock::now();
     EnsureRecovered();
     buffer_pool.BeginCheckpoint(*this);
     try {
@@ -694,17 +731,29 @@ void WriteAheadLog::Checkpoint(BufferPoolManager& buffer_pool) {
         AppendU32(record, Crc32c(record.data(), record.size()));
         WriteFullyAt(file_descriptor_, file_size_, record.data(), record.size());
         file_size_ += record.size();
+        MetricsRegistry::Instance().wal_bytes.Add(static_cast<uint64_t>(record.size()));
         Sync();
         FailPoint::Hit("checkpoint_before_truncate");
         FailPoint::Hit("wal_before_truncate");
         RewriteHeader(next_lsn_);
         durable_lsn_ = next_lsn_;
         log_count_ = 0;
+        ++checkpoint_count_;
+        last_checkpoint_unix_ms_ = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
     } catch (...) {
         buffer_pool.EndCheckpoint();
         throw;
     }
     buffer_pool.EndCheckpoint();
+    const uint64_t elapsed_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started)
+            .count());
+    MetricsRegistry::Instance().checkpoints.Increment();
+    MetricsRegistry::Instance().checkpoint_duration_us.Observe(elapsed_us);
 }
 
 void WriteAheadLog::RewriteHeader(uint64_t base_lsn) {

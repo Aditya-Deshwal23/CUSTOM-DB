@@ -858,6 +858,11 @@ size_t BufferPoolManager::pinned_frames() const {
         [](const Frame& frame) { return frame.pin_count.load(std::memory_order_relaxed) > 0; }));
 }
 
+size_t BufferPoolManager::FreePageCount() const {
+    std::lock_guard<RankedMutex> lock(pool_mutex_);
+    return free_pages_.size();
+}
+
 void BufferPoolManager::AssertNoPinsHeld() const {
     std::lock_guard<RankedMutex> lock(pool_mutex_);
     const auto pins = thread_pins_.find(std::this_thread::get_id());

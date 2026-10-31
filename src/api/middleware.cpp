@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "internal.h"
+#include "metrics/metrics.h"
 
 namespace relational_db {
 namespace {
@@ -27,6 +28,34 @@ bool IsSafeRequestId(const std::string& value) {
                return std::isalnum(character) != 0 || character == '-' || character == '_' ||
                       character == '.';
            });
+}
+
+HttpRoute RouteMetric(std::string_view path) {
+    if (path == "/health") {
+        return HttpRoute::HEALTH;
+    }
+    if (path == "/api/query") {
+        return HttpRoute::LEGACY_QUERY;
+    }
+    if (path == "/api/v1/query") {
+        return HttpRoute::QUERY;
+    }
+    if (path == "/api/metrics") {
+        return HttpRoute::API_METRICS;
+    }
+    if (path == "/metrics") {
+        return HttpRoute::PROMETHEUS;
+    }
+    if (path == "/api/v1/stats") {
+        return HttpRoute::STATS;
+    }
+    if (path == "/api/v1/stats/buffer_pool") {
+        return HttpRoute::BUFFER_POOL_STATS;
+    }
+    if (path == "/api/v1/stats/storage") {
+        return HttpRoute::STORAGE_STATS;
+    }
+    return HttpRoute::OTHER;
 }
 
 std::string MethodName(crow::HTTPMethod method) {
@@ -64,6 +93,19 @@ uint64_t ReadUnsigned(const char* name, uint64_t fallback) {
     const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
     if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || value == 0U) {
         throw std::invalid_argument(std::string("Invalid positive integer in ") + name);
+    }
+    return value;
+}
+
+uint64_t ReadUnsignedAllowZero(const char* name, uint64_t fallback) {
+    const std::string text = ReadEnvironment(name);
+    if (text.empty()) {
+        return fallback;
+    }
+    uint64_t value = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) {
+        throw std::invalid_argument(std::string("Invalid non-negative integer in ") + name);
     }
     return value;
 }
@@ -139,6 +181,7 @@ ApiConfig LoadApiConfig() {
     config.max_sql_bytes = ReadUnsigned("MAX_SQL_BYTES", config.max_sql_bytes);
     config.max_result_rows = ReadUnsigned("MAX_RESULT_ROWS", config.max_result_rows);
     config.statement_timeout_ms = ReadUnsigned("STATEMENT_TIMEOUT_MS", config.statement_timeout_ms);
+    config.slow_query_ms = ReadUnsignedAllowZero("SLOW_QUERY_MS", config.slow_query_ms);
     config.rate_limit_rps = ReadPositiveDouble("RATE_LIMIT_RPS", config.rate_limit_rps);
     config.rate_limit_burst = ReadPositiveDouble("RATE_LIMIT_BURST", config.rate_limit_burst);
     const std::string quota = ReadEnvironment("MAX_DB_BYTES");
@@ -165,7 +208,8 @@ ApiConfig LoadApiConfig() {
         throw std::invalid_argument("LOG_LEVEL must be debug, info, warn, error, or off");
     }
     if (config.max_body_bytes > 16U * 1024U * 1024U || config.max_result_rows > MAX_RESULT_ROWS ||
-        config.statement_timeout_ms > 600000U || config.rate_limit_burst < 1.0) {
+        config.statement_timeout_ms > 600000U || config.slow_query_ms > 3600000U ||
+        config.rate_limit_burst < 1.0) {
         throw std::invalid_argument("API limits are outside their supported ranges");
     }
     return config;
@@ -193,6 +237,7 @@ bool ApiMiddleware::ConsumeToken(const std::string& client_ip) {
         std::min(config.rate_limit_burst, bucket.tokens + elapsed * config.rate_limit_rps);
     bucket.updated = now;
     if (bucket.tokens < 1.0) {
+        MetricsRegistry::Instance().rate_limited_requests.Increment();
         return false;
     }
     bucket.tokens -= 1.0;
@@ -295,10 +340,9 @@ void ApiMiddleware::after_handle(crow::request& request, crow::response& respons
                              .count();
     const uint64_t duration = static_cast<uint64_t>(std::max<int64_t>(elapsed, 0));
     requests.fetch_add(1, std::memory_order_relaxed);
-    latency_us.fetch_add(duration, std::memory_order_relaxed);
-    if (response.code >= 400) {
-        errors.fetch_add(1, std::memory_order_relaxed);
-    }
+    MetricsRegistry& metrics = MetricsRegistry::Instance();
+    metrics.RecordHttpRequest(RouteMetric(request.url), response.code);
+    metrics.http_request_duration_us.Observe(duration);
     const bool is_error = response.code >= 500;
     const bool is_warning = response.code >= 400 && response.code < 500;
     if (config.log_level == "off" || (config.log_level == "error" && !is_error) ||

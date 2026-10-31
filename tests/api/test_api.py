@@ -11,6 +11,7 @@ import urllib.request
 import pytest
 import yaml
 from openapi_spec_validator import validate
+from prometheus_client.parser import text_string_to_metric_families
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -26,6 +27,7 @@ def running_server(tmp_path, extra_env=None, db_path=None):
         port = listener.getsockname()[1]
 
     env = os.environ.copy()
+    env.pop("DEMO_LOAD", None)
     env.update({"PORT": str(port), "DB_PATH": str(db_path or tmp_path / "api.db")})
     env.update(extra_env or {})
     process = subprocess.Popen(
@@ -120,6 +122,8 @@ def test_health_readiness_and_version_routes(api_server):
 
 
 def test_query_validation_and_status_mapping(api_server):
+    baseline_status, baseline, _ = request_json(api_server, "/api/v1/stats")
+    assert baseline_status == 200
     missing_status, missing, _ = request_json(api_server, "/api/v1/query", {})
     wrong_type_status, wrong_type, _ = request_json(
         api_server, "/api/v1/query", {"sql": ["SELECT 1"]}
@@ -160,9 +164,15 @@ def test_query_validation_and_status_mapping(api_server):
     assert response_headers["X-Request-Id"] == "client-request-42"
     assert response_headers["X-Content-Type-Options"] == "nosniff"
     assert response_headers["X-Frame-Options"] == "DENY"
+    final_status, final, _ = request_json(api_server, "/api/v1/stats")
+    assert final_status == 200
+    assert final["errors"] > baseline["errors"]
+    assert final["errors_by_code"]["unknown_table"] - baseline["errors_by_code"]["unknown_table"] == 1
 
 
 def test_sql_result_parameters_tables_and_stats(api_server):
+    baseline_status, baseline, _ = request_json(api_server, "/api/v1/stats")
+    assert baseline_status == 200
     assert post_sql(api_server, "CREATE TABLE api_contract (id INT PRIMARY KEY, label VARCHAR(40))")[0] == 200
     assert post_sql(api_server, "INSERT INTO api_contract VALUES ($1, $2)", [17, "safe'value"])[0] == 200
 
@@ -191,6 +201,18 @@ def test_sql_result_parameters_tables_and_stats(api_server):
     assert detail["schema"][0]["name"] == "id"
     assert any(index["unique"] for index in detail["indexes"])
     assert stats_status == 200 and stats["buffer_pool"]["hits"] >= 0
+    assert stats["statements"]["ddl"] - baseline["statements"]["ddl"] == 1
+    assert stats["statements"]["insert"] - baseline["statements"]["insert"] == 1
+    assert stats["statements"]["select"] - baseline["statements"]["select"] == 1
+    assert stats["statements"]["update"] - baseline["statements"]["update"] == 1
+    assert stats["rows_read"] - baseline["rows_read"] == 2
+    assert stats["rows_written"] - baseline["rows_written"] == 2
+    buffer_status, buffer_stats, _ = request_json(api_server, "/api/v1/stats/buffer_pool")
+    storage_status, storage_stats, _ = request_json(api_server, "/api/v1/stats/storage")
+    assert buffer_status == 200 and buffer_stats["snapshot_size"] == buffer_stats["pool_size"]
+    assert storage_status == 200
+    assert storage_stats["file_size_bytes"] == storage_stats["page_count"] * 4096
+    assert storage_stats["recovery"]["ran"] is True
 
 
 def test_malformed_json_body_limit_and_content_type(api_server, tmp_path):
@@ -330,6 +352,39 @@ def test_rate_limit_and_prometheus_metrics(tmp_path):
         assert metrics_status == 200
         assert b"# TYPE reldb_buffer_pool_hits_total counter" in metrics
         assert metrics_headers["Content-Type"].startswith("text/plain; version=0.0.4")
+        families = list(text_string_to_metric_families(metrics.decode()))
+        assert any(family.name == "reldb_http_requests" for family in families)
+        assert any(family.name == "reldb_statement_duration_us" for family in families)
+
+def test_demo_load_is_opt_in_and_uses_statement_counters(tmp_path):
+    with running_server(tmp_path, {"DEMO_LOAD": "1"}) as (base_url, _):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            status, stats, _ = request_json(base_url, "/api/v1/stats")
+            if status == 200 and stats["statements"]["select"] > 0:
+                break
+            time.sleep(0.1)
+        assert status == 200
+        assert stats["demo_load"] is True
+        assert stats["statements"]["select"] > 0
+
+def test_slow_query_log_includes_executed_plan(tmp_path):
+    with running_server(
+        tmp_path, {"SLOW_QUERY_MS": "1", "MAX_SQL_BYTES": "60000"}
+    ) as (base_url, process):
+        assert post_sql(
+            base_url, "CREATE TABLE slow_rows (id INT PRIMARY KEY, value INT)"
+        )[0] == 200
+        values = ", ".join(f"({row_id}, {row_id})" for row_id in range(3000))
+        assert post_sql(base_url, f"INSERT INTO slow_rows VALUES {values}")[0] == 200
+        status, result, _ = post_sql(
+            base_url, "SELECT id FROM slow_rows WHERE value = -1"
+        )
+        assert status == 200 and result["row_count"] == 0
+    log_output = process.stderr.read().decode()
+    assert '"event":"slow_query"' in log_output
+    assert '"statement":"SELECT"' in log_output
+    assert "SeqScan" in log_output
 
 
 def test_legacy_aliases_keep_deprecated_shapes(api_server):
@@ -341,6 +396,12 @@ def test_legacy_aliases_keep_deprecated_shapes(api_server):
     query_status, query, _ = request_json(
         api_server, "/api/query", {"query": "SELECT 12"}
     )
+    missing_key_status, missing_key, _ = request_json(
+        api_server, "/api/query", {"query": "SELECT 99999"}
+    )
+    metrics_after_missing_key_status, metrics_after_missing_key, _ = request_json(
+        api_server, "/api/metrics"
+    )
 
     assert health_status == 200 and health["status"] == "ok" and health["deprecated"]
     assert metrics_status == 200 and metrics["deprecated"]
@@ -348,6 +409,10 @@ def test_legacy_aliases_keep_deprecated_shapes(api_server):
     assert query_status == 200
     assert query["status"] == "success" and query["deprecated"] is True
     assert "result" in query
+    assert missing_key_status == 200 and "not found" in missing_key["result"]
+    assert metrics_after_missing_key_status == 200
+    assert metrics_after_missing_key["error_count"] == metrics["error_count"]
+    assert metrics_after_missing_key["active_latches"] == metrics_after_missing_key["active_statements"]
 
 
 def test_openapi_spec_and_query_example(api_server):

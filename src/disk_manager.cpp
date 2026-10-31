@@ -9,6 +9,7 @@
 
 #include "crc32c.h"
 #include "db_error.h"
+#include "metrics/metrics.h"
 #include "wal.h"
 
 #ifdef _WIN32
@@ -388,7 +389,9 @@ void FileDiskManager::ReadExact(uint64_t offset, char* buffer, size_t length, pa
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                              std::chrono::steady_clock::now() - start)
                              .count();
-    RecordLatency(read_latency_us_, static_cast<uint64_t>(std::max<int64_t>(elapsed, 0)));
+    const uint64_t elapsed_us = static_cast<uint64_t>(std::max<int64_t>(elapsed, 0));
+    RecordLatency(read_latency_us_, elapsed_us);
+    MetricsRegistry::Instance().disk_read_us.Observe(elapsed_us);
 }
 
 void FileDiskManager::WriteExact(uint64_t offset, const char* buffer, size_t length) {
@@ -430,7 +433,9 @@ void FileDiskManager::WriteExact(uint64_t offset, const char* buffer, size_t len
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                              std::chrono::steady_clock::now() - start)
                              .count();
-    RecordLatency(write_latency_us_, static_cast<uint64_t>(std::max<int64_t>(elapsed, 0)));
+    const uint64_t elapsed_us = static_cast<uint64_t>(std::max<int64_t>(elapsed, 0));
+    RecordLatency(write_latency_us_, elapsed_us);
+    MetricsRegistry::Instance().disk_write_us.Observe(elapsed_us);
 }
 
 void FileDiskManager::ReadPage(page_id_t page_id, char* page_data) {
@@ -598,11 +603,17 @@ void FileDiskManager::Sync() {
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                              std::chrono::steady_clock::now() - start)
                              .count();
-    RecordLatency(sync_latency_us_, static_cast<uint64_t>(std::max<int64_t>(elapsed, 0)));
+    const uint64_t elapsed_us = static_cast<uint64_t>(std::max<int64_t>(elapsed, 0));
+    RecordLatency(sync_latency_us_, elapsed_us);
+    MetricsRegistry::Instance().disk_sync_us.Observe(elapsed_us);
 }
 
 uint64_t FileDiskManager::SizeInPages() const {
     return page_count_.load(std::memory_order_acquire);
+}
+
+uint64_t FileDiskManager::FileSizeBytes() const {
+    return SizeInPages() * static_cast<uint64_t>(PAGE_SIZE);
 }
 
 void FileDiskManager::Extend(uint64_t page_count) {

@@ -12,6 +12,8 @@
 #include "b_plus_tree.h"
 #include "buffer_pool_manager.h"
 #include "executor.h"
+#include "demo/load_generator.h"
+#include "metrics/metrics.h"
 #include "slotted_page.h"
 #include "wal.h"
 
@@ -61,6 +63,12 @@ std::string ResolveDashboardPath() {
     return "dashboard";
 }
 
+bool ReadDemoLoadSetting(bool& enabled) {
+    const char* configured = std::getenv("DEMO_LOAD");
+    enabled = configured != nullptr && std::string(configured) == "1";
+    return configured == nullptr || std::string(configured) == "0" || enabled;
+}
+
 }  // namespace
 
 int main() {
@@ -70,12 +78,18 @@ int main() {
     std::cerr << "Custom Relational Storage Engine Initialized (Native UCRT64 Mode)" << std::endl;
 
     const int port = ReadPortFromEnv();
+    bool demo_load_enabled = false;
+    if (!ReadDemoLoadSetting(demo_load_enabled)) {
+        std::cerr << "DEMO_LOAD must be 0 or 1" << std::endl;
+        return 2;
+    }
     const std::string db_path = ReadDbPathFromEnv();
     const std::string dashboard_path = ResolveDashboardPath();
 
     std::cerr << "Selected PORT: " << port << std::endl;
     std::cerr << "Selected DB_PATH: " << db_path << std::endl;
     std::cerr << "Dashboard static path: " << dashboard_path << std::endl;
+    std::cerr << "Demo load: " << (demo_load_enabled ? "enabled" : "disabled") << std::endl;
 
     std::shared_ptr<DiskManager> disk_manager;
     std::shared_ptr<WriteAheadLog> wal;
@@ -106,6 +120,10 @@ int main() {
     }
 
     std::atomic<bool> running{true};
+    std::unique_ptr<DemoLoadGenerator> demo_load;
+    if (demo_load_enabled) {
+        demo_load = std::make_unique<DemoLoadGenerator>(*executor);
+    }
 
     std::thread signal_thread([api_server, &running]() {
         while (running.load() && g_shutdown_requested == 0) {
@@ -123,6 +141,7 @@ int main() {
     api_server->Run(port);
 
     running.store(false);
+    demo_load.reset();
 
     if (signal_thread.joinable()) {
         signal_thread.join();

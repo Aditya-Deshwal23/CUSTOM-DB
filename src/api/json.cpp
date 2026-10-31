@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "internal.h"
+#include "metrics/metrics.h"
 
 namespace relational_db {
 namespace {
@@ -51,6 +52,11 @@ crow::response JsonResponse(int status, const crow::json::wvalue& value) {
 crow::response ErrorResponse(int status, std::string code, std::string message,
                              const std::string& request_id, size_t line, size_t column,
                              std::string hint) {
+    MetricsRegistry& metrics = MetricsRegistry::Instance();
+    metrics.RecordError(MetricErrorFromCode(code));
+    if (code == "BUSY" || code == "BUFFER_POOL_EXHAUSTED") {
+        metrics.busy_rejections.Increment();
+    }
     crow::json::wvalue details;
     details["code"] = std::move(code);
     details["message"] = std::move(message);

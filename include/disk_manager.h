@@ -74,6 +74,9 @@ class IDiskManager {
     virtual void WritePageImage(page_id_t page_id, const uint8_t* image);
     virtual void Sync() = 0;
     virtual uint64_t SizeInPages() const = 0;
+    virtual uint64_t FileSizeBytes() const {
+        return SizeInPages() * static_cast<uint64_t>(PAGE_SIZE);
+    }
     virtual void Extend(uint64_t page_count) = 0;
     virtual void ReservePages(uint64_t page_count) {
         Extend(page_count);
@@ -106,6 +109,7 @@ class FileDiskManager final : public IDiskManager {
     void WritePageImage(page_id_t page_id, const uint8_t* image) override;
     void Sync() override;
     uint64_t SizeInPages() const override;
+    uint64_t FileSizeBytes() const override;
     void Extend(uint64_t page_count) override;
     void ReservePages(uint64_t page_count) override;
     void RestorePageCount(uint64_t page_count) noexcept override;

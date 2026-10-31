@@ -9,6 +9,7 @@
 #endif
 
 #include "config.h"
+#include "metrics/metrics.h"
 
 namespace relational_db {
 namespace {
@@ -211,6 +212,7 @@ bool WriterPreferringSharedMutex::TryLock(bool exclusive) {
     } else {
         ++active_readers_;
     }
+    MetricsRegistry::Instance().active_statements.Add(1);
     LockRankChecker::Acquired(LockRank::STATEMENT_GATE, this);
     return true;
 }
@@ -226,6 +228,7 @@ void WriterPreferringSharedMutex::Unlock(bool exclusive) noexcept {
     if (active_statements_ > 0) {
         --active_statements_;
     }
+    MetricsRegistry::Instance().active_statements.Add(-1);
     NotifyWaiters(readers_condition_, writers_condition_, waiting_writers_ != 0);
 }
 
@@ -242,6 +245,7 @@ size_t WriterPreferringSharedMutex::QueuedStatements() const {
 void WriterPreferringSharedMutex::Lock(bool exclusive,
                                        std::chrono::steady_clock::time_point deadline) {
     LockRankChecker::BeforeAcquire(LockRank::STATEMENT_GATE, this);
+    const auto wait_started = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lock(mutex_);
     const auto can_acquire = [this, exclusive]() {
         if (active_statements_ >= max_concurrent_ || writer_active_) {
@@ -254,15 +258,23 @@ void WriterPreferringSharedMutex::Lock(bool exclusive,
             throw DbError(ErrorCode::BUSY, "Statement queue is full");
         }
         ++queued_statements_;
+        MetricsRegistry::Instance().statement_waiters.Add(1);
         if (exclusive) {
             ++waiting_writers_;
         }
         const bool acquired = (exclusive ? writers_condition_ : readers_condition_)
                                   .wait_until(lock, deadline, can_acquire);
         --queued_statements_;
+        MetricsRegistry::Instance().statement_waiters.Add(-1);
         if (exclusive) {
             --waiting_writers_;
         }
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - wait_started)
+                .count();
+        MetricsRegistry::Instance().gate_wait_us.Observe(
+            elapsed > 0 ? static_cast<uint64_t>(elapsed) : uint64_t{0});
         if (!acquired) {
             NotifyWaiters(readers_condition_, writers_condition_, waiting_writers_ != 0);
             throw DbError(ErrorCode::BUSY, "Timed out waiting for the statement gate");
@@ -274,6 +286,7 @@ void WriterPreferringSharedMutex::Lock(bool exclusive,
     } else {
         ++active_readers_;
     }
+    MetricsRegistry::Instance().active_statements.Add(1);
     lock.unlock();
     LockRankChecker::Acquired(LockRank::STATEMENT_GATE, this);
 }

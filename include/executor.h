@@ -35,6 +35,9 @@ class Executor {
                                      uint64_t max_rows = MAX_RESULT_ROWS);
     std::vector<SqlTableMetadata> GetTables();
     std::optional<SqlTableMetadata> GetTable(std::string_view name);
+    WriteAheadLog* Wal() const noexcept {
+        return wal_;
+    }
 
     std::vector<Row> ScanWithPredicate(int start_key, int end_key, Predicate pred);
     std::optional<std::string> IntegrityCheck();

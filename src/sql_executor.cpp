@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "sql_parser.h"
+#include "metrics/metrics.h"
 
 namespace relational_db {
 
@@ -800,7 +801,11 @@ class SeqScan final : public TableScanOperator {
         if (context_.cancel != nullptr) {
             context_.cancel->Check();
         }
-        return iterator_.Next(*rid, *tuple);
+        const bool found = iterator_.Next(*rid, *tuple);
+        if (found) {
+            MetricsRegistry::Instance().rows_read.Increment();
+        }
+        return found;
     }
 
     std::string Name() const override {
@@ -852,6 +857,7 @@ class IndexRangeScan : public TableScanOperator {
                               rid->page_id);
             }
             *tuple = *found;
+            MetricsRegistry::Instance().rows_read.Increment();
             return true;
         }
         return false;
@@ -947,6 +953,7 @@ class IndexOrderScan final : public TableScanOperator {
                           rid->page_id);
         }
         *tuple = *found;
+        MetricsRegistry::Instance().rows_read.Increment();
         return true;
     }
 
@@ -2239,6 +2246,33 @@ std::string RenderAffectedRows(VolcanoOperator& root) {
     return std::to_string(std::get<int64_t>(row.front())) + " row(s) affected";
 }
 
+void RecordWrittenRows(std::string_view result) {
+    constexpr std::string_view kSuffix = " row(s) affected";
+    if (result.size() <= kSuffix.size() ||
+        result.substr(result.size() - kSuffix.size()) != kSuffix) {
+        return;
+    }
+    const std::string_view digits = result.substr(0, result.size() - kSuffix.size());
+    uint64_t count = 0;
+    const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), count);
+    if (parsed.ec == std::errc{} && parsed.ptr == digits.data() + digits.size()) {
+        MetricsRegistry::Instance().rows_written.Add(count);
+    }
+}
+
+void RecordPlanType(std::string_view access_path) {
+    if (!MetricUpdatesEnabled()) {
+        return;
+    }
+    MetricsRegistry& metrics = MetricsRegistry::Instance();
+    if (access_path.find("index") != std::string_view::npos ||
+        access_path.find("Index") != std::string_view::npos) {
+        metrics.index_scans.Increment();
+    } else {
+        metrics.sequential_scans.Increment();
+    }
+}
+
 std::string StatementPlan(const SqlStatement& statement, Catalog& catalog,
                           ExecutionContext& context) {
     if (statement.kind == SqlStatementKind::SELECT) {
@@ -2340,6 +2374,7 @@ class SqlExecutionEngine::Impl {
             if (transaction) {
                 transaction->Commit();
             }
+            RecordWrittenRows(result);
             buffer_pool_->AssertNoPinsHeld();
             return result;
         } catch (const DbError&) {
@@ -2382,6 +2417,7 @@ class SqlExecutionEngine::Impl {
             ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &scope.Cancellation(),
                                      nullptr};
             QueryPlan plan = BuildSelectPlan(context, table, statement);
+            RecordPlanType(plan.access_path);
             result.columns = plan.output_schema.columns;
             result.column_names = plan.output_names;
             result.plan = FormatPlan(plan);
@@ -2529,6 +2565,7 @@ class SqlExecutionEngine::Impl {
         CatalogTable& table = RequireTable(catalog_, statement.table);
         ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, cancellation, stats};
         QueryPlan plan = BuildSelectPlan(context, table, statement);
+        RecordPlanType(plan.access_path);
         const std::string result = RenderRows(*plan.root, plan.output_schema, plan.output_names);
         buffer_pool_->AssertNoPinsHeld();
         return result;
@@ -2566,6 +2603,7 @@ class SqlExecutionEngine::Impl {
                 CatalogTable& table = RequireTable(catalog_, statement.table);
                 std::string access_path;
                 auto input = BuildDmlInput(context, table, statement, access_path);
+                RecordPlanType(access_path);
                 std::vector<UpdateAssignment> assignments;
                 for (const SqlAssignment& assignment : statement.assignments) {
                     UpdateAssignment bound;
@@ -2583,6 +2621,7 @@ class SqlExecutionEngine::Impl {
                 CatalogTable& table = RequireTable(catalog_, statement.table);
                 std::string access_path;
                 auto input = BuildDmlInput(context, table, statement, access_path);
+                RecordPlanType(access_path);
                 Delete operation(context, table, std::move(input));
                 const std::string result = RenderAffectedRows(operation);
                 buffer_pool_->AssertNoPinsHeld();
@@ -2642,6 +2681,7 @@ class SqlExecutionEngine::Impl {
             if (transaction) {
                 transaction->Commit();
             }
+            RecordWrittenRows(affected);
             std::ostringstream output;
             output << "Access path: executed write statement\n" << affected << '\n';
             for (const OperatorMetrics& metric : stats.Metrics()) {

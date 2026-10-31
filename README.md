@@ -39,13 +39,17 @@ The disk and WAL formats are documented in [docs/FILE_FORMAT.md](docs/FILE_FORMA
 - `GET /healthz`, `GET /readyz`: liveness and recovery/writability readiness
 - `POST /api/v1/query`: SQL request/response contract documented in [docs/openapi.yaml](docs/openapi.yaml)
 - `GET /api/v1/tables`, `GET /api/v1/tables/{name}`, `GET /api/v1/stats`
-- `GET /metrics`: Prometheus exposition
+- `GET /api/v1/stats/buffer_pool`: per-frame pin, dirty, and reference-bit snapshot
+- `GET /api/v1/stats/storage`: database pages, free pages, WAL size, checkpoint, and recovery summary
+- `GET /metrics`: Prometheus 0.0.4 exposition with route/status counters and log2-microsecond histograms
 - `GET /api/v1/version`, `POST /api/v1/admin/checkpoint`
 - Legacy `/health`, `/api/metrics`, and `/api/query` aliases return deprecated responses.
 
 The current Render demo is [custom-db-engine.onrender.com](https://custom-db-engine.onrender.com). Set `READ_ONLY=1` for the public demo; Render availability and filesystem persistence depend on the configured service and plan.
 
-API settings are validated at startup: `MAX_BODY_BYTES` (default 65536), `MAX_SQL_BYTES` (16384), `MAX_RESULT_ROWS` (1000), `STATEMENT_TIMEOUT_MS` (2000), `RATE_LIMIT_RPS` (20), `RATE_LIMIT_BURST` (40), `MAX_DB_BYTES` (unset means no quota), `READ_ONLY` (0/1), optional `API_KEY`, comma-separated `CORS_ORIGINS` (empty by default), and `LOG_LEVEL` (`debug`, `info`, `warn`, `error`, or `off`). When `API_KEY` is set, SQL writes and administrative checkpoints require `X-API-Key`; checkpoints always require a configured key.
+Metrics use real statement, HTTP, buffer-pool, disk, WAL, and gate events. `/api/v1/stats` reports a buffer-pool hit rate calculated from counter deltas between requests; the deprecated `/api/metrics` retains legacy field names and derives `active_latches` from active statements. Successful legacy `SELECT <key>` misses are not counted as errors.
+
+API settings are validated at startup: `MAX_BODY_BYTES` (default 65536), `MAX_SQL_BYTES` (16384), `MAX_RESULT_ROWS` (1000), `STATEMENT_TIMEOUT_MS` (2000), `SLOW_QUERY_MS` (0 disables slow-query logging), `RATE_LIMIT_RPS` (20), `RATE_LIMIT_BURST` (40), `MAX_DB_BYTES` (unset means no quota), `READ_ONLY` (0/1), optional `API_KEY`, comma-separated `CORS_ORIGINS` (empty by default), and `LOG_LEVEL` (`debug`, `info`, `warn`, `error`, or `off`). `DEMO_LOAD=1` opts in to a low-rate SQL point-lookup workload through the normal executor; it is disabled by default and is reported as `demo_load`. When `API_KEY` is set, SQL writes and administrative checkpoints require `X-API-Key`; checkpoints always require a configured key.
 
 ## Build and run
 

@@ -136,7 +136,7 @@ paths:
       operationId: getStats
       responses:
         "200":
-          description: Live buffer-pool, disk, and HTTP counters.
+          description: Live SQL, HTTP, buffer-pool, disk, WAL, and process metrics.
           content:
             application/json:
               schema:
@@ -146,12 +146,56 @@ paths:
                     type: object
                   disk:
                     type: object
+                  statements:
+                    type: object
+                  statement_duration_us:
+                    type: object
+  /api/v1/stats/buffer_pool:
+    get:
+      operationId: getBufferPoolSnapshot
+      responses:
+        "200":
+          description: Live per-frame buffer-pool snapshot and pin state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pool_size:
+                    type: integer
+                  snapshot_size:
+                    type: integer
+                  frames:
+                    type: array
+                    items:
+                      type: object
+  /api/v1/stats/storage:
+    get:
+      operationId: getStorageStats
+      responses:
+        "200":
+          description: Live database, free-page, WAL, checkpoint, and recovery statistics.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file_size_bytes:
+                    type: integer
+                  page_count:
+                    type: integer
+                  free_pages:
+                    type: integer
+                  wal_size_bytes:
+                    type: integer
+                  recovery:
+                    type: object
   /metrics:
     get:
       operationId: prometheusMetrics
       responses:
         "200":
-          description: Prometheus text exposition.
+          description: Prometheus text exposition format 0.0.4 from live counters and timers.
           content:
             text/plain:
               schema:

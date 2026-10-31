@@ -11,6 +11,7 @@
 
 #include "sql_executor.h"
 #include "sql_parser.h"
+#include "metrics/metrics.h"
 
 namespace relational_db {
 namespace {
@@ -40,6 +41,95 @@ bool ParseInt64(std::string_view token, int64_t& value) {
     const auto parsed = std::from_chars(first, last, value);
     return parsed.ec == std::errc{} && parsed.ptr == last;
 }
+
+std::optional<StatementMetric> ClassifyStatement(std::string_view query) {
+    size_t position = 0;
+    for (;;) {
+        while (position < query.size() &&
+               std::isspace(static_cast<unsigned char>(query[position])) != 0) {
+            ++position;
+        }
+        if (position + 1U < query.size() && query[position] == '-' &&
+            query[position + 1U] == '-') {
+            position = query.find('\n', position + 2U);
+            if (position == std::string_view::npos) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (position + 1U < query.size() && query[position] == '/' &&
+            query[position + 1U] == '*') {
+            const size_t end = query.find("*/", position + 2U);
+            if (end == std::string_view::npos) {
+                return std::nullopt;
+            }
+            position = end + 2U;
+            continue;
+        }
+        break;
+    }
+    const auto read_word = [&query, &position]() {
+        while (position < query.size() &&
+               std::isspace(static_cast<unsigned char>(query[position])) != 0) {
+            ++position;
+        }
+        const size_t start = position;
+        while (position < query.size() &&
+               std::isalpha(static_cast<unsigned char>(query[position])) != 0) {
+            ++position;
+        }
+        return query.substr(start, position - start);
+    };
+    std::string_view command = read_word();
+    if (EqualsIgnoreCase(command, "EXPLAIN")) {
+        const std::string_view next = read_word();
+        command = EqualsIgnoreCase(next, "ANALYZE") ? read_word() : next;
+    }
+    if (EqualsIgnoreCase(command, "SELECT")) {
+        return StatementMetric::SELECT;
+    }
+    if (EqualsIgnoreCase(command, "INSERT")) {
+        return StatementMetric::INSERT;
+    }
+    if (EqualsIgnoreCase(command, "UPDATE")) {
+        return StatementMetric::UPDATE;
+    }
+    if (EqualsIgnoreCase(command, "DELETE")) {
+        return StatementMetric::DELETE;
+    }
+    if (EqualsIgnoreCase(command, "CREATE") || EqualsIgnoreCase(command, "DROP") ||
+        EqualsIgnoreCase(command, "ALTER")) {
+        return StatementMetric::DDL;
+    }
+    return std::nullopt;
+}
+
+class StatementMetricScope {
+   public:
+    StatementMetricScope(std::string_view query, MetricsRegistry& metrics)
+        : enabled_(MetricUpdatesEnabled()),
+          statement_(enabled_ ? ClassifyStatement(query) : std::nullopt),
+          metrics_(metrics),
+          started_(enabled_ ? std::chrono::steady_clock::now()
+                            : std::chrono::steady_clock::time_point{}) {}
+
+    ~StatementMetricScope() {
+        if (enabled_ && statement_) {
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - started_)
+                    .count();
+            metrics_.RecordStatement(*statement_,
+                                     static_cast<uint64_t>(std::max<int64_t>(elapsed, 0)));
+        }
+    }
+
+   private:
+    bool enabled_;
+    std::optional<StatementMetric> statement_;
+    MetricsRegistry& metrics_;
+    std::chrono::steady_clock::time_point started_;
+};
 
 }  // namespace
 
@@ -94,6 +184,7 @@ void Executor::InitializeHeap() {
 }
 
 std::string Executor::ExecuteQuery(const std::string& query) {
+    StatementMetricScope statement_metrics(query, MetricsRegistry::Instance());
     try {
         std::vector<SqlToken> tokens;
         try {
@@ -110,18 +201,25 @@ std::string Executor::ExecuteQuery(const std::string& query) {
         if (content_end == 3U && tokens[1].kind == SqlTokenKind::INTEGER &&
             tokens[2].kind == SqlTokenKind::INTEGER && EqualsIgnoreCase(tokens[0].text, "INSERT")) {
             std::string result = ExecuteLegacyQuery(query);
+            if (result.rfind("Inserted (", 0) == 0) {
+                MetricsRegistry::Instance().rows_written.Increment();
+            }
             bpm_->AssertNoPinsHeld();
             return result;
         }
         if (content_end == 2U && tokens[1].kind == SqlTokenKind::INTEGER &&
             EqualsIgnoreCase(tokens[0].text, "SELECT")) {
             std::string result = ExecuteLegacyQuery(query);
+            MetricsRegistry::Instance().index_scans.Increment();
             bpm_->AssertNoPinsHeld();
             return result;
         }
         std::string result = sql_engine_->Execute(query);
         bpm_->AssertNoPinsHeld();
         return result;
+    } catch (const DbError&) {
+        bpm_->AssertNoPinsHeld();
+        throw;
     } catch (const std::exception&) {
         bpm_->AssertNoPinsHeld();
         throw;
@@ -130,9 +228,15 @@ std::string Executor::ExecuteQuery(const std::string& query) {
 
 SqlExecutionResult Executor::ExecuteResult(const std::string& query,
                                            std::chrono::milliseconds timeout, uint64_t max_rows) {
-    SqlExecutionResult result = sql_engine_->ExecuteResult(query, timeout, max_rows);
-    bpm_->AssertNoPinsHeld();
-    return result;
+    StatementMetricScope statement_metrics(query, MetricsRegistry::Instance());
+    try {
+        SqlExecutionResult result = sql_engine_->ExecuteResult(query, timeout, max_rows);
+        bpm_->AssertNoPinsHeld();
+        return result;
+    } catch (const DbError&) {
+        bpm_->AssertNoPinsHeld();
+        throw;
+    }
 }
 
 std::vector<SqlTableMetadata> Executor::GetTables() {
@@ -207,6 +311,7 @@ std::string Executor::ExecuteLegacyQuery(const std::string& query) {
                               "Index RID does not reference a live SQL row");
             }
             const Row row = DeserializeTuple(SqlSchema(), *tuple);
+            MetricsRegistry::Instance().rows_read.Increment();
             return "Result: " + std::to_string(std::get<int64_t>(row[1]));
         }
         return "Key " + std::to_string(key) + " not found.";
@@ -231,6 +336,7 @@ std::vector<Row> Executor::ScanWithPredicate(int start_key, int end_key, Predica
             throw DbError(ErrorCode::PAGE_CORRUPT, "Index RID does not reference a live SQL row");
         }
         Row row = DeserializeTuple(SqlSchema(), *tuple);
+        MetricsRegistry::Instance().rows_read.Increment();
         if (pred(row)) {
             results.push_back(row);
         }

@@ -48,6 +48,11 @@ the bounded in-memory bucket map. Middleware releases it before route handlers
 can enter the statement gate or perform storage I/O. HTTP counters and server
 readiness flags are atomics; no API mutex is nested with the storage lock order.
 
+Metrics use fixed-label arrays and relaxed atomic counters/gauges/histogram
+buckets. Recording does not allocate or acquire a registry-wide mutex; a scrape
+is a weakly consistent snapshot and never holds a metrics lock while reading
+engine state. Metrics are independent of the ranked storage-lock order.
+
 No disk read, write, extension, or sync occurs under the buffer-pool page-table
 mutex. A fetch reserves and publishes a frame under that mutex, performs disk
 I/O after releasing it, then publishes the ready frame while acquiring the

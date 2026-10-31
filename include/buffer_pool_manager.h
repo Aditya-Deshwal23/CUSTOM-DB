@@ -80,6 +80,7 @@ class BufferPoolManager {
     BufferPoolStats SnapshotStats() const;
     std::vector<FrameInfo> Snapshot() const;
     size_t pinned_frames() const;
+    size_t FreePageCount() const;
     void AssertNoPinsHeld() const;
     size_t PoolSize() const noexcept {
         return frames_.size();

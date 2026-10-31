@@ -211,3 +211,28 @@ These are local observations, not performance guarantees or CI thresholds.
 Read scaling decreases on this host as threads contend for shared engine
 resources; rerun on the deployment hardware before drawing capacity
 conclusions.
+
+## Metrics recording overhead
+
+`bench/metrics_overhead_bench.cpp` compares warmed point-SELECT execution with
+metrics recording enabled and disabled. Each condition was measured for five
+three-second repetitions, with random interleaving enabled.
+
+Command:
+
+```sh
+./build-release/reldb_metrics_overhead_benchmarks --benchmark_min_time=3s --benchmark_repetitions=5 --benchmark_enable_random_interleaving=true
+```
+
+Observed on 2026-10-31, local Apple Silicon macOS host, Release build:
+
+| Condition | Mean CPU time per point SELECT |
+|---|---:|
+| Metrics enabled | 2.698 us |
+| Metrics disabled | 2.664 us |
+
+This is **1.28% CPU-time overhead**, equivalent to a **1.26% throughput
+reduction**. The enabled and disabled coefficients of variation were 0.74%
+and 1.92%, respectively. CPU-frequency and thread-affinity metadata were
+unavailable, and the host had concurrent background load; treat this as a
+local observation rather than a performance guarantee or CI threshold.

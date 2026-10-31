@@ -22,6 +22,7 @@ struct ApiConfig {
     uint64_t max_sql_bytes{16U * 1024U};
     uint64_t max_result_rows{1000U};
     uint64_t statement_timeout_ms{2000U};
+    uint64_t slow_query_ms{0U};
     double rate_limit_rps{20.0};
     double rate_limit_burst{40.0};
     uint64_t max_db_bytes{0};
@@ -44,9 +45,6 @@ class ApiMiddleware {
     ApiConfig config;
     std::atomic<uint64_t> requests{0};
     std::atomic<uint64_t> queries{0};
-    std::atomic<uint64_t> query_latency_us{0};
-    std::atomic<uint64_t> errors{0};
-    std::atomic<uint64_t> latency_us{0};
     std::chrono::steady_clock::time_point started_at{std::chrono::steady_clock::now()};
 
     void before_handle(crow::request& request, crow::response& response, context& ctx);
@@ -78,6 +76,10 @@ struct ApiServer::Impl {
     std::unordered_map<std::string, std::string> static_files;
     std::atomic<bool> recovering{false};
     std::atomic<bool> draining{false};
+    std::mutex stats_window_mutex;
+    uint64_t previous_stats_hits{0};
+    uint64_t previous_stats_misses{0};
+    std::chrono::steady_clock::time_point previous_stats_at{};
 };
 
 ApiConfig LoadApiConfig();
