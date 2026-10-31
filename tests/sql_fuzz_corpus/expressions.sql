@@ -1,0 +1,1 @@
+SELECT COUNT(*), AVG(price) FROM items i WHERE NOT (price BETWEEN 1.5 AND $2 OR label LIKE 'row_%') ORDER BY price DESC LIMIT 20 OFFSET 2;

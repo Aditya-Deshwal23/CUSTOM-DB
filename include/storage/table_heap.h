@@ -63,6 +63,7 @@ class TableHeap {
     bool Delete(const RID& rid);
     std::optional<RID> Update(const RID& rid, const Tuple& tuple);
     TableIterator Begin() const;
+    void Drop();
 
    private:
     static constexpr size_t MAX_RECLAIMED_PAGES = 32;

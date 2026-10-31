@@ -44,16 +44,20 @@
 | A process crash during a normal API write preserves acknowledged writes | in progress | `DurabilityTest.HardKillKeepsAckedWrites` is Linux-only; local validation skipped on macOS |
 | A 200-iteration PR and 5,000-iteration nightly crash harness reports kill-site coverage | in progress | Pending Linux crash runner and CI/nightly execution evidence |
 | WAL commit latency/throughput per durability mode and checkpoint pause are measured | verified | `reldb_wal_benchmarks`; `docs/benchmarks.md` records the run command, host, modes, and results |
-| API query commands support integer `INSERT <key> <value>` and point `SELECT <key>` | verified | `scripts/verify_resume_claims.sh` exercises these commands |
-| The executor supports arbitrary SQL tables or `SELECT * FROM Users` | removed | The executor supports only integer-key INSERT/SELECT; arbitrary SQL parsing/catalog queries are not implemented |
-| The engine implements general SQL, a user-facing catalog, multi-statement transaction isolation, or a query planner | removed | The API executor only supports integer `INSERT`/point `SELECT`; statement-atomic auto-commit does not provide general SQL, a user-facing catalog, multi-statement transactions/isolation, or a query planner |
-| TableHeap is safe for concurrent writers or readers | removed | `docs/CONCURRENCY.md`; no table-level synchronization or TSan stress test is provided |
-| Query parsing is zero-copy using `std::string_view` | removed | `src/executor.cpp` uses `std::string` token copies |
+| API query commands support both legacy integer commands and the implemented SQL subset | verified | `scripts/verify_resume_claims.sh`; `SqlExecutionTest.*`; `tools/difftest.py` |
+| SQL lexer tokens are zero-copy source views with line/column positions, and the parser/printer round-trip the supported v1 statement and expression grammar | verified | `SqlLexerTest.*` and `SqlParserTest.*` in `tests/sql_parser_test.cpp`; nightly ASan/UBSan grammar fuzz in `.github/workflows/nightly.yml` |
+| Durable SQL catalog and the documented SQL DDL/DML/SELECT subset are connected to the executor | verified | `SqlExecutionTest.*`; catalog restart, rollback, and index-maintenance cases |
+| SQL planning selects point, range, ordered-index, and sequential access paths; EXPLAIN ANALYZE reports runtime operator and buffer-pool deltas | verified | `SqlExecutionTest.CreatesTablesAndExecutesIndexedSelects`; `SqlExecutionTest.ExecutesFiltersRangesProjectionSortAndLimits` |
+| SQL statement writes roll back completely on failure, and reads share the statement gate while DDL/DML take it exclusively | verified | `SqlExecutionTest.FailedMultiRowInsertRollsBackEveryRow`; `SqlExecutionTest.FailedUpdateRollsBackEarlierRowsAndIndexes`; `ConcurrencyTest.SqlExecutorStatementGateTsanStress`; CI TSan job |
+| The supported SQL subset differentially matches SQLite over 10,000 seeded operations | verified | `.github/workflows/ci.yml` runs `tools/difftest.py --statements 10000`; deliberate comparison limits are documented in `docs/SQL_EXECUTION.md` |
+| SQL point select, 100-row range select, insert, update, and full-scan aggregate workloads are benchmarked at 10k/100k/1M rows | verified | `reldb_sql_execution_benchmarks`; `docs/benchmarks.md` |
+| Direct unsynchronized TableHeap access is safe for concurrent readers/writers | removed | `docs/CONCURRENCY.md`; the SQL executor gate, not TableHeap itself, serializes writes against readers |
+| SQL lexer token text is source-backed and zero-copy | verified | `SqlLexerTest.*` and `SqlParserTest.*` in `tests/sql_parser_test.cpp` |
 | The B+ tree uses latch crabbing | removed | `docs/CONCURRENCY.md`; writers are serialized by the caller's statement gate |
-| Executor serializes writers and permits concurrent readers without data races | verified | `ConcurrencyTest.ExecutorStatementGateTsanClean`; `.github/workflows/ci.yml` TSan job |
+| Executor serializes writers and permits concurrent readers without data races | verified | `ConcurrencyTest.ExecutorStatementGateTsanClean`; `ConcurrencyTest.SqlExecutorStatementGateTsanStress`; `.github/workflows/ci.yml` TSan job |
 | Metrics describe a real engine-wide workload | removed | `/api/metrics` explicitly reports zero values with source `uninstrumented` until instrumentation is implemented |
 | The dashboard reports real active latch counts and disk-I/O latency | removed | `active_latches` and derived I/O latency are not exposed; dashboard simulation uses a persistent warning |
 | Dashboard schema and execution trace represent a live catalog/backend trace | removed | `README.md`; the simulation trace is explicitly illustrative |
 | The dashboard uses no random-number calls to fabricate metrics | verified | CI's `Check metrics honesty` step runs `MetricsTest.NoFabricatedValues`; `scripts/run_known_bugs.sh` reports it |
-| A 10,000-record HTTP benchmark measured specific insert/read latency and throughput | in progress | `scripts/benchmark_api.py` and historical results in `docs/RESUME_EVIDENCE_REPORT.md`; not a CI performance gate |
+| SQL benchmark timings are performance guarantees | removed | `docs/benchmarks.md` labels local measurements as observations, not CI thresholds |
 | The project is high-performance, production-grade, or general-purpose ACID | removed | The engine supports single-writer, statement-atomic redo recovery; it does not implement general SQL transaction isolation |

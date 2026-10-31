@@ -14,25 +14,16 @@
 
 namespace relational_db {
 
+class SqlExecutionEngine;
+
 using DbValue = Value;
 using Predicate = std::function<bool(const Row&)>;
 
 class Executor {
    public:
-    explicit Executor(std::shared_ptr<BufferPoolManager> bpm) : bpm_(std::move(bpm)) {
-        tree_ = std::make_unique<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>>(
-            bpm_, IndexKey16Less(), IndexKeyKind::INT32);
-        InitializeHeap();
-    }
-
-    Executor(std::shared_ptr<BufferPoolManager> bpm, WriteAheadLog& wal)
-        : bpm_(std::move(bpm)), wal_(&wal) {
-        auto transaction = bpm_->BeginTransaction(wal);
-        tree_ = std::make_unique<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>>(
-            bpm_, IndexKey16Less(), IndexKeyKind::INT32);
-        InitializeHeap();
-        transaction->Commit();
-    }
+    explicit Executor(std::shared_ptr<BufferPoolManager> bpm);
+    Executor(std::shared_ptr<BufferPoolManager> bpm, WriteAheadLog& wal);
+    ~Executor();
 
     /**
      * @brief Executes a simple string-based query.
@@ -48,12 +39,14 @@ class Executor {
    private:
     static const Schema& SqlSchema();
     void InitializeHeap();
+    std::string ExecuteLegacyQuery(const std::string& query);
 
     std::shared_ptr<BufferPoolManager> bpm_;
     mutable std::shared_mutex statement_gate_;
     WriteAheadLog* wal_{nullptr};
     std::unique_ptr<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>> tree_;
     std::unique_ptr<TableHeap> heap_;
+    std::unique_ptr<SqlExecutionEngine> sql_engine_;
 };
 
 }  // namespace relational_db

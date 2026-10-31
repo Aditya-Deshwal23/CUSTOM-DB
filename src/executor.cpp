@@ -1,23 +1,40 @@
 #include "executor.h"
 
+#include <cctype>
 #include <charconv>
 #include <iostream>
 #include <limits>
 #include <mutex>
 #include <sstream>
+#include <string_view>
 #include <system_error>
+
+#include "sql_executor.h"
+#include "sql_parser.h"
 
 namespace relational_db {
 namespace {
 
-bool ParseInt32(const std::string& token, int32_t& value) {
+bool EqualsIgnoreCase(std::string_view left, std::string_view right) {
+    if (left.size() != right.size())
+        return false;
+    for (size_t index = 0; index < left.size(); ++index) {
+        if (std::tolower(static_cast<unsigned char>(left[index])) !=
+            std::tolower(static_cast<unsigned char>(right[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ParseInt32(std::string_view token, int32_t& value) {
     const char* const first = token.data();
     const char* const last = first + token.size();
     const auto parsed = std::from_chars(first, last, value);
     return parsed.ec == std::errc{} && parsed.ptr == last;
 }
 
-bool ParseInt64(const std::string& token, int64_t& value) {
+bool ParseInt64(std::string_view token, int64_t& value) {
     const char* const first = token.data();
     const char* const last = first + token.size();
     const auto parsed = std::from_chars(first, last, value);
@@ -25,6 +42,27 @@ bool ParseInt64(const std::string& token, int64_t& value) {
 }
 
 }  // namespace
+
+Executor::Executor(std::shared_ptr<BufferPoolManager> bpm) : bpm_(std::move(bpm)) {
+    tree_ = std::make_unique<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>>(
+        bpm_, IndexKey16Less(), IndexKeyKind::INT32);
+    InitializeHeap();
+    sql_engine_ =
+        std::make_unique<SqlExecutionEngine>(bpm_, wal_, statement_gate_, tree_->MetaPageId());
+}
+
+Executor::Executor(std::shared_ptr<BufferPoolManager> bpm, WriteAheadLog& wal)
+    : bpm_(std::move(bpm)), wal_(&wal) {
+    auto transaction = bpm_->BeginTransaction(wal);
+    tree_ = std::make_unique<BPlusTree<IndexKey16, uint64_t, IndexKey16Less>>(
+        bpm_, IndexKey16Less(), IndexKeyKind::INT32);
+    InitializeHeap();
+    transaction->Commit();
+    sql_engine_ =
+        std::make_unique<SqlExecutionEngine>(bpm_, wal_, statement_gate_, tree_->MetaPageId());
+}
+
+Executor::~Executor() = default;
 
 const Schema& Executor::SqlSchema() {
     static const Schema schema{
@@ -55,26 +93,47 @@ void Executor::InitializeHeap() {
     }
 }
 
-static std::string nextToken(const std::string& sv, size_t& pos) {
-    while (pos < sv.size() && sv[pos] == ' ') ++pos;
-    if (pos >= sv.size())
-        return "";
-
-    size_t start = pos;
-    while (pos < sv.size() && sv[pos] != ' ') ++pos;
-    return sv.substr(start, pos - start);
+std::string Executor::ExecuteQuery(const std::string& query) {
+    std::vector<SqlToken> tokens;
+    try {
+        tokens = SqlLexer::Tokenize(query);
+    } catch (const SqlError&) {
+        return sql_engine_->Execute(query);
+    }
+    size_t content_end = tokens.size() - 1U;
+    if (content_end != 0U && tokens[content_end - 1U].kind == SqlTokenKind::SEMICOLON) {
+        --content_end;
+    }
+    if (content_end == 3U && tokens[1].kind == SqlTokenKind::INTEGER &&
+        tokens[2].kind == SqlTokenKind::INTEGER && EqualsIgnoreCase(tokens[0].text, "INSERT")) {
+        std::string result = ExecuteLegacyQuery(query);
+        bpm_->AssertNoPinsHeld();
+        return result;
+    }
+    if (content_end == 2U && tokens[1].kind == SqlTokenKind::INTEGER &&
+        EqualsIgnoreCase(tokens[0].text, "SELECT")) {
+        std::string result = ExecuteLegacyQuery(query);
+        bpm_->AssertNoPinsHeld();
+        return result;
+    }
+    return sql_engine_->Execute(query);
 }
 
-std::string Executor::ExecuteQuery(const std::string& query) {
-    size_t pos = 0;
-    std::string command = nextToken(query, pos);
+std::string Executor::ExecuteLegacyQuery(const std::string& query) {
+    const std::vector<SqlToken> tokens = SqlLexer::Tokenize(query);
+    const std::string_view command = tokens.size() > 1 ? tokens[0].text : std::string_view{};
+    const bool semicolon =
+        tokens.size() > 1 && tokens[tokens.size() - 2].kind == SqlTokenKind::SEMICOLON;
+    const size_t statement_end = semicolon ? tokens.size() - 2 : tokens.size() - 1;
 
-    if (command == "INSERT") {
-        std::string key_s = nextToken(query, pos);
-        std::string val_s = nextToken(query, pos);
+    if (EqualsIgnoreCase(command, "INSERT")) {
+        if (statement_end != 3 || tokens[1].kind != SqlTokenKind::INTEGER ||
+            tokens[2].kind != SqlTokenKind::INTEGER) {
+            return "Syntax error: INSERT <key> <value>";
+        }
         int32_t key = 0;
         int64_t value = 0;
-        if (!ParseInt32(key_s, key) || !ParseInt64(val_s, value)) {
+        if (!ParseInt32(tokens[1].text, key) || !ParseInt64(tokens[2].text, value)) {
             return "Syntax error: INSERT <key> <value>";
         }
         std::unique_lock<std::shared_mutex> lock(statement_gate_);
@@ -103,10 +162,12 @@ std::string Executor::ExecuteQuery(const std::string& query) {
             throw;
         }
         return "Inserted (" + std::to_string(key) + ", " + std::to_string(value) + ")";
-    } else if (command == "SELECT") {
-        std::string key_s = nextToken(query, pos);
+    } else if (EqualsIgnoreCase(command, "SELECT")) {
+        if (statement_end != 2 || tokens[1].kind != SqlTokenKind::INTEGER) {
+            return "Syntax error: SELECT <key>";
+        }
         int32_t key = 0;
-        if (!ParseInt32(key_s, key)) {
+        if (!ParseInt32(tokens[1].text, key)) {
             return "Syntax error: SELECT <key>";
         }
         std::shared_lock<std::shared_mutex> lock(statement_gate_);

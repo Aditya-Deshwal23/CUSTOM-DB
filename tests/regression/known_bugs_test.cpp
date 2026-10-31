@@ -98,8 +98,8 @@ TEST(PersistenceTest, ExecutorIndexAndRowsSurviveCleanRestart) {
         wal.Recover(*disk);
         auto bpm = std::make_shared<BufferPoolManager>(50, disk);
         Executor executor(bpm, wal);
-        EXPECT_EQ(executor.ExecuteQuery("INSERT 42 9001"), "Inserted (42, 9001)");
-        EXPECT_EQ(executor.ExecuteQuery("SELECT 42"), "Result: 9001");
+        EXPECT_EQ(executor.ExecuteQuery("insert 42 9001;"), "Inserted (42, 9001)");
+        EXPECT_EQ(executor.ExecuteQuery("sElEcT 42"), "Result: 9001");
         EXPECT_FALSE(executor.IntegrityCheck());
     }
 
@@ -108,7 +108,7 @@ TEST(PersistenceTest, ExecutorIndexAndRowsSurviveCleanRestart) {
     wal.Recover(*disk);
     auto bpm = std::make_shared<BufferPoolManager>(50, disk);
     Executor reopened_executor(bpm, wal);
-    EXPECT_EQ(reopened_executor.ExecuteQuery("SELECT 42"), "Result: 9001");
+    EXPECT_EQ(reopened_executor.ExecuteQuery("select 42;"), "Result: 9001");
     EXPECT_FALSE(reopened_executor.IntegrityCheck());
 }
 

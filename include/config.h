@@ -17,6 +17,10 @@ using frame_id_t = int32_t;
 // Invalid page ID to indicate null/empty
 constexpr static const page_id_t INVALID_PAGE_ID = -1;
 
+constexpr uint64_t MAX_RESULT_ROWS = 100000;
+constexpr uint64_t MAX_SORT_ROWS = 100000;
+constexpr uint64_t STATEMENT_TIMEOUT_MS = 5000;
+
 } // namespace relational_db
 
 #endif // CONFIG_H

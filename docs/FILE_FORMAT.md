@@ -169,11 +169,29 @@ An `INDEX_META` body begins with exactly eight bytes:
 | 4 | 2 | Tree height (`0` for empty) |
 | 6 | 2 | Key-kind enum |
 
-The database header's `catalog_root` points to the one SQL index's metadata
-page. Root and height updates use the metadata page's write guard. The SQL
-executor stores its table-heap header page ID in the metadata page's reserved
-bytes beginning at body offset 8. This is executor catalog wiring; it does not
-change the 8-byte B+ tree metadata layout.
+The database header's `catalog_root` points to the legacy owner `INDEX_META`
+page. Its body retains the legacy heap header page ID at offset 8, and stores
+the SQL catalog page ID at offset 12. A zero catalog page ID means that an old
+database has no SQL catalog yet. SQL table indexes each have their own
+`INDEX_META` page containing the B+ tree root, height, and key kind.
+
+The SQL catalog is currently one `CATALOG` page. Its body is an explicit
+little-endian encoding, not a native C++ structure:
+
+| Field | Encoding |
+|---|---|
+| Version | `u32` (`1`) |
+| Table count | `u16` |
+| Table name | `u16` byte length, then UTF-8 bytes |
+| Heap header page ID | `u32` page ID |
+| Column count | `u16` |
+| Primary-key column | `u16` ordinal; `0xffff` means none |
+| Each column | name string, `u8` type enum, `u16` VARCHAR length, `u8` NOT NULL flag |
+| Index count | `u16` |
+| Each index | name string, `u16` column ordinal, `u8` unique flag, `u32` metadata page ID |
+
+The complete encoding must fit in the page body (`PAGE_DATA_SIZE`); a catalog
+that exceeds one page fails rather than silently truncating metadata.
 
 Non-root internal nodes have at least `ceil(max_children / 2) - 1`
 separators. Non-root leaves have at least ten percent of leaf capacity, rounded
@@ -188,17 +206,22 @@ collapses a one-child root. Retired nodes return to the allocator's free list.
 
 * Signed INT32/INT64 are sign-bit-flipped, then big-endian.
 * BOOLEAN is `00` or `01`, followed by zero bytes.
-* VARCHAR is at most 16 bytes, zero-padded; embedded NUL is rejected.
+* The generic B+ tree VARCHAR key encoding is at most 16 bytes, zero-padded;
+  SQL catalog indexes instead use a 64-bit FNV-1a hash prefix for VARCHAR
+  equality candidates.
 * A composite key contains up to two independently sign-flipped INT32 fields,
   each big-endian, followed by zero bytes.
 * A non-unique key is the 8-byte big-endian value followed by the 8-byte
   big-endian RID. Both components are fixed-width, making every stored key
   unique and preserving range order.
 
-Unique indexes use the key bytes directly and report `DUPLICATE_KEY`. B+ tree
-value fields are fixed-width 8-byte integers; the legacy SQL index stores a
-packed RID there. The executor stores each SQL row in `TableHeap` and indexes
-its packed RID; it does not keep SQL values in an in-memory-only side structure.
+SQL non-unique index keys contain the ordered 8-byte scalar prefix followed by
+the 8-byte big-endian packed RID, keeping duplicate values distinct while
+preserving numeric range order. VARCHAR hashes are not order-preserving, so
+VARCHAR range/order access falls back to a heap scan. Candidate rows are
+rechecked against their values, including for unique-index enforcement.
+B+ tree value fields are fixed-width 8-byte integers; SQL indexes store packed
+RIDs there. SQL rows remain in `TableHeap`, not in an in-memory-only structure.
 
 RIDs contain a signed 32-bit page ID and unsigned 16-bit slot number. Their
 64-bit index representation stores the page ID in bits 16-47 and the slot in

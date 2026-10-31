@@ -1,9 +1,6 @@
 #ifndef B_PLUS_TREE_H
 #define B_PLUS_TREE_H
 
-#include "buffer_pool_manager.h"
-#include "index_key.h"
-
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -15,8 +12,12 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "buffer_pool_manager.h"
+#include "index_key.h"
 
 namespace relational_db {
 namespace bpt_detail {
@@ -327,6 +328,51 @@ public:
 
     page_id_t MetaPageId() const noexcept {
         return meta_page_id_;
+    }
+
+    void Drop() {
+        std::vector<page_id_t> pending;
+        std::vector<page_id_t> pages;
+        std::unordered_set<page_id_t> visited;
+        if (root_page_id_ != INVALID_PAGE_ID) {
+            pending.push_back(root_page_id_);
+        }
+        while (!pending.empty()) {
+            const page_id_t page_id = pending.back();
+            pending.pop_back();
+            if (!visited.insert(page_id).second) {
+                continue;
+            }
+            pages.push_back(page_id);
+            ReadPageGuard guard = FetchRead(page_id);
+            if (guard.GetPageType() == PageType::BTREE_INTERNAL) {
+                const auto* internal = InternalRead(guard);
+                const uint16_t count = ReadCount(internal->count.data());
+                if (count > kInternalKeyCapacity) {
+                    throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree node during DROP",
+                                  page_id);
+                }
+                for (uint16_t index = 0; index <= count; ++index) {
+                    pending.push_back(
+                        bpt_detail::ReadPageId(internal->entries[index].child_page_id.data()));
+                }
+            } else if (guard.GetPageType() != PageType::BTREE_LEAF) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Unexpected page in B+ tree during DROP",
+                              page_id);
+            }
+        }
+        for (page_id_t page_id : pages) {
+            if (!buffer_pool_->DeletePage(page_id)) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Could not retire B+ tree page", page_id);
+            }
+        }
+        if (!buffer_pool_->DeletePage(meta_page_id_)) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Could not retire B+ tree metadata",
+                          meta_page_id_);
+        }
+        root_page_id_ = INVALID_PAGE_ID;
+        height_ = 0;
+        meta_page_id_ = INVALID_PAGE_ID;
     }
 
     double FillFactor() const {

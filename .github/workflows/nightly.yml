@@ -29,3 +29,14 @@ jobs:
         env:
           RELDB_EXHAUSTIVE_PAGE_CHECKSUM: "1"
         run: build/reldb_regression_tests --gtest_filter=DiskManagerTest.DetectsSingleBitErrorsInSampledOrExhaustivePageBits
+
+  sql-grammar-fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Clang libFuzzer target
+        run: CC=clang CXX=clang++ cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DRELDB_BUILD_FUZZERS=ON -DRELDB_BUILD_BENCHMARKS=OFF -DRELDB_BUILD_TESTS=OFF
+      - name: Build SQL grammar fuzzer
+        run: cmake --build build-fuzz --target sql_grammar_fuzz --parallel
+      - name: Fuzz SQL grammar under ASan and UBSan for ten minutes
+        run: build-fuzz/sql_grammar_fuzz tests/sql_fuzz_corpus -max_total_time=600 -timeout=5

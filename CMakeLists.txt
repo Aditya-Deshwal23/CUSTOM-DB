@@ -13,6 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(RELDB_WERROR "Treat project compiler warnings as errors" OFF)
 option(RELDB_BUILD_TESTS "Build GoogleTest regression tests" ON)
 option(RELDB_BUILD_BENCHMARKS "Build Google Benchmark targets" ON)
+option(RELDB_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 set(RELDB_SANITIZE "none" CACHE STRING "Sanitizer: address, undefined, thread, or none")
 set_property(CACHE RELDB_SANITIZE PROPERTY STRINGS address undefined thread none)
 
@@ -60,6 +61,21 @@ if(RELDB_BUILD_BENCHMARKS)
   FetchContent_MakeAvailable(benchmark)
 endif()
 
+if(RELDB_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "RELDB_BUILD_FUZZERS requires Clang with libFuzzer support")
+  endif()
+  add_executable(sql_grammar_fuzz EXCLUDE_FROM_ALL
+    tools/sql_grammar_fuzz.cpp
+    src/sql_parser.cpp
+  )
+  target_include_directories(sql_grammar_fuzz PRIVATE include)
+  target_compile_options(sql_grammar_fuzz PRIVATE
+    -Wall -Wextra -Wpedantic -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
+  )
+  target_link_options(sql_grammar_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()
+
 find_package(Threads REQUIRED)
 
 add_library(reldb_core STATIC
@@ -71,7 +87,10 @@ add_library(reldb_core STATIC
   src/buffer_pool_manager.cpp
   src/storage/tuple.cpp
   src/storage/table_heap.cpp
+  src/catalog.cpp
+  src/sql_executor.cpp
   src/b_plus_tree.cpp
+  src/sql_parser.cpp
   src/executor.cpp
   src/wal.cpp
 )
@@ -122,6 +141,8 @@ if(RELDB_BUILD_TESTS)
     tests/disk_manager_test.cpp
     tests/buffer_pool_test.cpp
     tests/storage_test.cpp
+    tests/sql_parser_test.cpp
+    tests/sql_execution_test.cpp
   )
   target_compile_definitions(reldb_regression_tests PRIVATE
     RELDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -148,6 +169,8 @@ if(RELDB_BUILD_BENCHMARKS)
   target_link_libraries(reldb_storage_benchmarks PRIVATE reldb_core benchmark::benchmark)
   add_executable(reldb_wal_benchmarks bench/wal_bench.cpp)
   target_link_libraries(reldb_wal_benchmarks PRIVATE reldb_core benchmark::benchmark)
+  add_executable(reldb_sql_execution_benchmarks bench/sql_execution_bench.cpp)
+  target_link_libraries(reldb_sql_execution_benchmarks PRIVATE reldb_core)
 endif()
 
 set(project_targets reldb_core relational_db)
@@ -157,7 +180,7 @@ if(RELDB_BUILD_TESTS)
 endif()
 if(RELDB_BUILD_BENCHMARKS)
   list(APPEND project_targets reldb_benchmarks reldb_disk_benchmarks reldb_buffer_pool_benchmarks
-       reldb_storage_benchmarks reldb_wal_benchmarks)
+       reldb_storage_benchmarks reldb_wal_benchmarks reldb_sql_execution_benchmarks)
 endif()
 foreach(target IN LISTS project_targets)
   reldb_configure_project_target(${target})

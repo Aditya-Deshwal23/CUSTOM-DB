@@ -32,6 +32,12 @@ jobs:
         run: scripts/verify_disk_syncs.sh build/reldb_disk_sync_probe
       - name: Check metrics honesty
         run: build/reldb_regression_tests --gtest_filter=MetricsTest.NoFabricatedValues
+      - name: SQLite SQL differential (10,000 statements)
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: python3 tools/difftest.py --binary build/relational_db --statements 10000
+      - name: Verify SQL execution benchmark target
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: cmake --build build --target reldb_sql_execution_benchmarks --parallel
       - name: Verify HTTP examples and shutdown
         run: scripts/verify_resume_claims.sh
       - name: Print known-bug table
@@ -68,7 +74,7 @@ jobs:
           if-no-files-found: ignore
 
   tsan:
-    name: Thread sanitizer known-bug stress
+    name: Thread sanitizer stress
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +88,10 @@ jobs:
         run: build-tsan/reldb_regression_tests --gtest_filter=DiskManagerTest.ConcurrentDistinctPageIo
       - name: Run statement-gate TSan stress
         shell: bash
-        run: build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.ExecutorStatementGateTsanClean | tee tsan.log
+        run: |
+          set -o pipefail
+          build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.ExecutorStatementGateTsanClean | tee tsan.log
+          build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress | tee -a tsan.log
       - name: Run WAL timer TSan stress
         run: build-tsan/reldb_regression_tests --gtest_filter=WalTest.NormalModeSyncThreadTsanClean
       - name: Upload TSan log on failure

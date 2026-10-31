@@ -158,3 +158,23 @@ metadata were unavailable. These are local observations, not CI thresholds.
 | `normal`, four keys per commit | 6.98 us/commit | 642.73 k keys/s |
 | `off`, four keys per commit | 6.11 us/commit | 671.999 k keys/s |
 | `full`, checkpoint of 256 rows | 3.99 ms/checkpoint | n/a |
+
+## SQL execution workloads
+
+`bench/sql_execution_bench.cpp` loads 10,000, 100,000, or 1,000,000 rows,
+then reports mean wall latency for 100 indexed point selects, 100 indexed
+100-row range selects, 100 single-row inserts, 100 single-row updates, and
+five full-scan aggregate queries. Dataset setup is excluded from timed
+intervals. Each scale uses a fresh temporary database and removes it afterward.
+The benchmark explicitly uses WAL `off`; this is unsafe for real data and is
+enabled only with `ALLOW_UNSAFE=1`. These timings do not measure durable commit
+latency.
+
+Command:
+
+```sh
+ALLOW_UNSAFE=1 ./build-release/reldb_sql_execution_benchmarks
+```
+
+The target prints the exact per-scale results on the host where it is run.
+Local results are observations, not CI performance gates.

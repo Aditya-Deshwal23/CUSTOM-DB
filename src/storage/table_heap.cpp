@@ -329,4 +329,35 @@ TableIterator TableHeap::Begin() const {
     return TableIterator(buffer_pool_, ReadHeader().first);
 }
 
+void TableHeap::Drop() {
+    const auto links = ReadHeader();
+    std::vector<page_id_t> pages;
+    page_id_t page_id = links.first;
+    std::unordered_set<page_id_t> visited;
+    while (page_id != INVALID_PAGE_ID) {
+        if (page_id <= 0 || !visited.insert(page_id).second) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid or cyclic heap page list during DROP",
+                          page_id);
+        }
+        page_id_t next_page_id = INVALID_PAGE_ID;
+        {
+            ReadPageGuard guard = buffer_pool_.FetchRead(page_id);
+            const auto* body = guard.As<std::array<char, PAGE_DATA_SIZE>>();
+            next_page_id = SlottedPage(body->data()).GetNextPageId();
+        }
+        pages.push_back(page_id);
+        page_id = next_page_id;
+    }
+    for (page_id_t page : pages) {
+        if (!buffer_pool_.DeletePage(page)) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Could not retire table heap page", page);
+        }
+    }
+    if (!buffer_pool_.DeletePage(header_page_id_)) {
+        throw DbError(ErrorCode::PAGE_CORRUPT, "Could not retire table heap header",
+                      header_page_id_);
+    }
+    header_page_id_ = INVALID_PAGE_ID;
+}
+
 }  // namespace relational_db

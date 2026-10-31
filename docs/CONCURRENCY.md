@@ -41,9 +41,10 @@ acquired its page latch.
 `TableHeap` uses page guards for every header/data-page access and retains at
 most one page guard in a `TableIterator`. Buffer-pool latches protect individual
 pages, but `TableHeap` does not serialize concurrent insert, update, delete, or
-reclaimed-page-set operations. Treat each heap as single-writer and do not
-concurrently mutate or scan it until table-level synchronization and TSan
-stress coverage are added.
+reclaimed-page-set operations. Direct callers must provide synchronization.
+`Executor`'s statement gate protects SQL heap use: SELECT takes a shared lock;
+DDL and DML take the exclusive lock. This prevents scans from overlapping a
+mutation and serializes writers.
 
 ## B+ tree and statement gate
 
@@ -52,10 +53,11 @@ crabbing. Its caller must enforce the Phase 8 statement-gate contract: one
 writer at a time, or multiple readers with no concurrent writer. Operations
 retain only the current page guard except while adjusting a parent/sibling;
 the descent path stores page IDs and child indexes, not parent pointers.
-`Executor` implements the gate with a per-instance `std::shared_mutex`: INSERT
-takes the exclusive lock and SELECT/range reads take shared locks. The tree's
-page guards still protect individual page bodies and scans retain one leaf
-guard at a time. Direct B+ tree callers must provide the same gate themselves.
+`Executor` implements the gate with a per-instance `std::shared_mutex`: SQL
+DDL/DML and legacy INSERT take the exclusive lock; SELECT/range reads take
+shared locks. The tree's page guards still protect individual page bodies and
+scans retain one leaf guard at a time. Direct B+ tree callers must provide the
+same gate themselves.
 
 This is not latch crabbing and does not permit a tree writer to run concurrently
 with readers. `TableHeap` has no independent concurrent-writer protocol; the
@@ -90,8 +92,10 @@ a global disk-I/O mutex. Windows seek-plus-I/O uses its descriptor mutex.
 `BufferPoolStressTest.SixteenThreadsOneMillionVerifiedOperations` exercises
 16 threads with one million page-ID/CRC-verified operations per thread and
 prints its seed. `DiskManagerTest.ConcurrentDistinctPageIo` exercises
-independent page I/O. Run the buffer-pool stress test under TSan as well as
-ASan/UBSan on the Linux CI host.
+independent page I/O. `ConcurrencyTest.SqlExecutorStatementGateTsanStress`
+mixes shared SQL reads with an exclusively gated writer, prints its shuffle
+seed, and runs in the CI TSan job. These stress tests do not make direct
+unsynchronized `TableHeap` or B+ tree access safe.
 
 The WAL's no-steal rule is enforced by transaction page snapshots and
 write-back checks. Direct buffer-pool write access remains a low-level API:
