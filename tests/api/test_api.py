@@ -438,7 +438,12 @@ def test_demo_load_is_opt_in_and_uses_statement_counters(tmp_path):
 
 def test_slow_query_log_includes_executed_plan(tmp_path):
     with running_server(
-        tmp_path, {"SLOW_QUERY_MS": "1", "MAX_SQL_BYTES": "60000"}
+        tmp_path,
+        {
+            "SLOW_QUERY_MS": "1",
+            "MAX_RESULT_ROWS": "5000",
+            "MAX_SQL_BYTES": "60000",
+        },
     ) as (base_url, process):
         assert post_sql(
             base_url, "CREATE TABLE slow_rows (id INT PRIMARY KEY, value INT)"
@@ -446,9 +451,9 @@ def test_slow_query_log_includes_executed_plan(tmp_path):
         values = ", ".join(f"({row_id}, {row_id})" for row_id in range(3000))
         assert post_sql(base_url, f"INSERT INTO slow_rows VALUES {values}")[0] == 200
         status, result, _ = post_sql(
-            base_url, "SELECT id FROM slow_rows WHERE value = -1"
+            base_url, "SELECT id FROM slow_rows ORDER BY value"
         )
-        assert status == 200 and result["row_count"] == 0
+        assert status == 200 and result["row_count"] == 3000
     log_output = process.stderr.read().decode()
     assert '"event":"slow_query"' in log_output
     assert '"statement":"SELECT"' in log_output
