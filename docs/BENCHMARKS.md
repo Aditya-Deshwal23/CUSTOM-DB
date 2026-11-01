@@ -11,13 +11,13 @@ engine; SQLite uses Python's in-process `sqlite3` interface. This is a useful
 user-facing path comparison, **not an apples-to-apples engine-core benchmark**.
 It includes CUSTOM-DB's server and serialization overhead.
 
-Observed on 2026-10-31, Apple M5 (`arm64`), macOS 27.0.1, Python 3.14.7,
+Observed on 2026-11-01, Apple M5 (`arm64`), macOS 27.0.1, Python 3.14.7,
 SQLite 3.53.4, Release CUSTOM-DB build:
 
 | Implementation / path | Median throughput | Median p50 | Median p95 |
 |---|---:|---:|---:|
-| CUSTOM-DB, HTTP + JSON | 6,000 reads/s | 158.0 us | 207.7 us |
-| SQLite, Python `sqlite3` | 671,366 reads/s | 1.38 us | 1.67 us |
+| CUSTOM-DB, HTTP + JSON | 6,124 reads/s | 158.5 us | 193.0 us |
+| SQLite, Python `sqlite3` | 666,426 reads/s | 1.38 us | 1.79 us |
 
 Reproduce the exact workload and print per-run results:
 

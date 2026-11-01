@@ -87,12 +87,12 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md), [WAL_AND_RECOVERY.md](docs/WAL_AND_
 
 ## Benchmark headline
 
-Five seeded, warm point-read runs against 10,000 rows on an Apple M5 (`arm64`), macOS 27.0.1, Python 3.14.7, SQLite 3.53.4; 1,000 reads per engine per run. Setup is excluded. CUSTOM-DB is measured through its HTTP/JSON API, while SQLite is measured in-process through Python's `sqlite3` module, so this is a user-facing path comparison, **not an apples-to-apples engine-core benchmark**.
+Five seeded, warm point-read runs against 10,000 rows on an Apple M5 (`arm64`), macOS 27.0.1, Python 3.14.7, SQLite 3.53.4 (observed 2026-11-01); 1,000 reads per engine per run. Setup is excluded. CUSTOM-DB is measured through its HTTP/JSON API, while SQLite is measured in-process through Python's `sqlite3` module, so this is a user-facing path comparison, **not an apples-to-apples engine-core benchmark**.
 
 | Implementation / path | Median throughput | Median p50 | Median p95 |
 |---|---:|---:|---:|
-| CUSTOM-DB, HTTP + JSON | 6,000 reads/s | 158.0 us | 207.7 us |
-| SQLite, Python `sqlite3` | 671,366 reads/s | 1.38 us | 1.67 us |
+| CUSTOM-DB, HTTP + JSON | 6,124 reads/s | 158.5 us | 193.0 us |
+| SQLite, Python `sqlite3` | 666,426 reads/s | 1.38 us | 1.79 us |
 
 Reproduce with [`tools/benchmark_sqlite.py`](tools/benchmark_sqlite.py); full methodology and other engine benchmarks are in [BENCHMARKS.md](docs/BENCHMARKS.md). These are local observations, not performance promises.
 
