@@ -43,6 +43,20 @@ using relational_db::DiskManager;
 using relational_db::Executor;
 using relational_db::WriteAheadLog;
 
+#if defined(__linux__)
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr bool kAddressSanitizerEnabled = true;
+#else
+constexpr bool kAddressSanitizerEnabled = false;
+#endif
+#elif defined(__SANITIZE_ADDRESS__)
+constexpr bool kAddressSanitizerEnabled = true;
+#else
+constexpr bool kAddressSanitizerEnabled = false;
+#endif
+#endif
+
 class TemporaryPath {
    public:
     TemporaryPath() {
@@ -711,11 +725,14 @@ TEST(BPlusTreeTest, RangeScanTerminatesAfterSplit) {
     const pid_t child = fork();
     ASSERT_GE(child, 0);
     if (child == 0) {
-        struct rlimit memory_limit{};
-        memory_limit.rlim_cur = 1024ULL * 1024ULL * 1024ULL;
-        memory_limit.rlim_max = memory_limit.rlim_cur;
-        if (setrlimit(RLIMIT_AS, &memory_limit) != 0) {
-            _exit(20);
+        if constexpr (!kAddressSanitizerEnabled) {
+            // ASan's shadow-memory mappings do not fit under this virtual-memory cap.
+            struct rlimit memory_limit{};
+            memory_limit.rlim_cur = 1024ULL * 1024ULL * 1024ULL;
+            memory_limit.rlim_max = memory_limit.rlim_cur;
+            if (setrlimit(RLIMIT_AS, &memory_limit) != 0) {
+                _exit(20);
+            }
         }
         alarm(5);
 
