@@ -418,28 +418,37 @@ jobs:
         with:
           target: http://127.0.0.1:18082
           rules_file_name: .zap/rules.tsv
-          cmd_options: -J zap-baseline.json
           fail_action: true
           allow_issue_writing: false
+      - name: Preserve ZAP baseline report
+        if: always()
+        run: |
+          test ! -f report_json.json || cp report_json.json zap-baseline.json
+          test ! -f report_html.html || cp report_html.html zap-baseline.html
       - name: OWASP ZAP OpenAPI scan
         uses: zaproxy/action-api-scan@77dfa9a647bb0f583e39d4df8531634d6ddd8df4 # v0.9.0
         with:
           target: /github/workspace/docs/openapi.yaml
           format: openapi
           rules_file_name: .zap/rules.tsv
-          cmd_options: -O http://127.0.0.1:18082 -J zap-api.json
+          cmd_options: -O http://127.0.0.1:18082
           fail_action: true
           allow_issue_writing: false
+      - name: Preserve ZAP API report
+        if: always()
+        run: |
+          test ! -f report_json.json || cp report_json.json zap-api.json
+          test ! -f report_html.html || cp report_html.html zap-api.html
       - name: Upload dynamic security reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dynamic-security-reports
           path: |
-            report_html.html
-            report_json.json
             zap-baseline.json
+            zap-baseline.html
             zap-api.json
+            zap-api.html
           if-no-files-found: ignore
       - name: Upload Schemathesis debug trace after failure
         if: failure()
