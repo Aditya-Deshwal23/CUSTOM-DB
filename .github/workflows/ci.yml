@@ -406,6 +406,9 @@ jobs:
             --checks all \
             --hypothesis-max-examples 100 \
             --workers 1
+      - name: Show test service logs after failure
+        if: failure()
+        run: docker logs --tail 200 custom-db-security
       - name: OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@7c4deb10e6261301961c86d65d54a516394f9aed # v0.14.0
         with:
