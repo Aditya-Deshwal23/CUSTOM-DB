@@ -2,3 +2,6 @@
 # policies on robots/sitemap responses and short-lived caching of static assets.
 # API responses are separately asserted to use no-store by tests/api/test_api.py.
 10049	IGNORE	(Informational cache-policy observations are intentional and covered by header tests)
+# ZAP 100001 is low risk and flags the documented HTML/CSS/JS static routes when
+# the OpenAPI scan crawls the host root; API JSON content types are contract-tested.
+100001	IGNORE	(Low-risk static asset content types are expected; API JSON types are tested)

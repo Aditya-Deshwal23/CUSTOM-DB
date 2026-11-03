@@ -573,10 +573,12 @@ def test_history_is_columnar_and_bounded(api_server):
 
 def test_slow_query_ring_omits_bound_parameter_values(tmp_path):
     with running_server(
-        tmp_path, {"SLOW_QUERY_MS": "1"}, db_path=tmp_path / "slow-inspector.db"
+        tmp_path,
+        {"SLOW_QUERY_MS": "1", "RATE_LIMIT_BURST": "200"},
+        db_path=tmp_path / "slow-inspector.db",
     ) as (base_url, _):
         assert post_sql(base_url, "CREATE TABLE slow_payload (id INT, label VARCHAR(255))")[0] == 200
-        for batch in range(10):
+        for batch in range(100):
             start = batch * 40
             batch_rows = ", ".join(
                 f"({index}, '{'x' * 200}')" for index in range(start, start + 40)
