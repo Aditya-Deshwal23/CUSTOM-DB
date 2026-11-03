@@ -81,6 +81,7 @@ void ApplyResponseHeaders(crow::response& response, bool trusted_https) {
                         "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
                         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
                         "object-src 'none'; manifest-src 'self'");
+    response.add_header("Cross-Origin-Embedder-Policy", "require-corp");
     response.add_header("Cross-Origin-Opener-Policy", "same-origin");
     response.add_header("Cross-Origin-Resource-Policy", "same-origin");
     response.add_header(

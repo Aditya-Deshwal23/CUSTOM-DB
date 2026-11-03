@@ -32,6 +32,7 @@ EXPECTED_SECURITY_HEADERS = {
         "screen-wake-lock=(), shared-storage=(), speaker-selection=(), storage-access=(), "
         "sync-xhr=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()"
     ),
+    "Cross-Origin-Embedder-Policy": "require-corp",
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
     "Referrer-Policy": "no-referrer",
