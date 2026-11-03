@@ -1,1 +1,4 @@
-# No alert IDs are ignored; medium and higher findings must be triaged and fixed.
+# ZAP 10049 is informational (risk code 0): it reports intentional no-store
+# policies on robots/sitemap responses and short-lived caching of static assets.
+# API responses are separately asserted to use no-store by tests/api/test_api.py.
+10049	IGNORE	(Informational cache-policy observations are intentional and covered by header tests)
