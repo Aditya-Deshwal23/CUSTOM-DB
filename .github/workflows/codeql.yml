@@ -51,7 +51,8 @@ jobs:
           for severity in high critical; do
             count="$(gh api --paginate \
               "/repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&severity=${severity}&ref=${REF_NAME}" \
-              --jq 'length' | awk '{ total += $1 } END { print total + 0 }')"
+              --jq 'map(select(.tool.name == "CodeQL")) | length' \
+              | awk '{ total += $1 } END { print total + 0 }')"
             if [[ "${count}" -gt 0 ]]; then
               echo "Found ${count} open ${severity} CodeQL alert(s) on ${REF_NAME}" >&2
               exit 1
@@ -89,7 +90,8 @@ jobs:
           for severity in high critical; do
             count="$(gh api --paginate \
               "/repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&severity=${severity}&ref=${REF_NAME}" \
-              --jq 'length' | awk '{ total += $1 } END { print total + 0 }')"
+              --jq 'map(select(.tool.name == "CodeQL")) | length' \
+              | awk '{ total += $1 } END { print total + 0 }')"
             if [[ "${count}" -gt 0 ]]; then
               echo "Found ${count} open ${severity} CodeQL alert(s) on ${REF_NAME}" >&2
               exit 1
