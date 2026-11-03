@@ -196,6 +196,33 @@ def test_query_validation_and_status_mapping(api_server):
     assert final["errors_by_code"]["unknown_table"] - baseline["errors_by_code"]["unknown_table"] == 1
 
 
+def test_legacy_query_alias_binds_parameter_values(api_server):
+    assert post_sql(api_server, "CREATE TABLE api_parameter_guard (name VARCHAR(40))")[0] == 200
+    assert post_sql(api_server, "INSERT INTO api_parameter_guard VALUES ('private-row')")[0] == 200
+
+    injected_status, injected, _ = request_json(
+        api_server,
+        "/api/query",
+        {
+            "sql": "SELECT name FROM api_parameter_guard WHERE name = $1",
+            "params": ["unknown' OR '1'='1"],
+        },
+    )
+    assert injected_status == 200 and injected["status"] == "success"
+    assert "private-row" not in injected["result"]
+
+    matching_status, matching, _ = request_json(
+        api_server,
+        "/api/query",
+        {
+            "sql": "SELECT name FROM api_parameter_guard WHERE name = $1",
+            "params": ["private-row"],
+        },
+    )
+    assert matching_status == 200 and matching["status"] == "success"
+    assert "private-row" in matching["result"]
+
+
 def test_sql_result_parameters_tables_and_stats(api_server):
     baseline_status, baseline, _ = request_json(api_server, "/api/v1/stats")
     assert baseline_status == 200

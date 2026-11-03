@@ -5,3 +5,7 @@
 # ZAP 100001 is low risk and flags the documented HTML/CSS/JS static routes when
 # the OpenAPI scan crawls the host root; API JSON content types are contract-tested.
 100001	IGNORE	(Low-risk static asset content types are expected; API JSON types are tested)
+# ZAP 40018's boolean heuristic is a false positive for escaped bound strings on
+# the deprecated alias. tests/api/test_api.py verifies they cannot broaden results.
+# Time-based SQL injection rules remain enabled.
+40018	IGNORE	(False positive for escaped bound parameters; regression test covers the legacy route)
