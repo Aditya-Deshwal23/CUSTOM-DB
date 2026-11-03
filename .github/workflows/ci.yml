@@ -428,7 +428,7 @@ jobs:
       - name: OWASP ZAP OpenAPI scan
         uses: zaproxy/action-api-scan@77dfa9a647bb0f583e39d4df8531634d6ddd8df4 # v0.9.0
         with:
-          target: /github/workspace/docs/openapi.yaml
+          target: docs/openapi.yaml
           format: openapi
           rules_file_name: .zap/rules.tsv
           cmd_options: -O http://127.0.0.1:18082
