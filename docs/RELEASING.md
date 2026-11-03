@@ -47,8 +47,8 @@ performed by CI:
   pushes; require the four build matrix checks (`gcc / Debug`, `gcc / Release`,
   `clang / Debug`, `clang / Release`), `Address and undefined behavior
   sanitizers`, `Thread sanitizer stress`, `WAL hard-kill recovery (200
-  iterations)`, `Formatting and Dockerfile lint`, `Docker image build`, and
-  `codeql`.
+  iterations)`, `Formatting and Dockerfile lint`, `Docker image build`,
+  `codeql`, and `codeql / python-javascript`.
 - [ ] Enable Dependabot alerts and Dependabot security updates.
 - [ ] Enable secret scanning and push protection.
 - [ ] Enable private vulnerability reporting.
