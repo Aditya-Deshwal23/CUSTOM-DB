@@ -41,6 +41,50 @@ bool EqualsIgnoreCase(std::string_view left, std::string_view right) {
     return true;
 }
 
+std::string Base64Encode(const std::vector<uint8_t>& bytes) {
+    constexpr std::string_view alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    encoded.reserve(((bytes.size() + 2U) / 3U) * 4U);
+    for (size_t index = 0; index < bytes.size(); index += 3U) {
+        const uint32_t first = bytes[index];
+        const uint32_t second = index + 1U < bytes.size() ? bytes[index + 1U] : 0U;
+        const uint32_t third = index + 2U < bytes.size() ? bytes[index + 2U] : 0U;
+        const uint32_t group = (first << 16U) | (second << 8U) | third;
+        encoded.push_back(alphabet[(group >> 18U) & 0x3fU]);
+        encoded.push_back(alphabet[(group >> 12U) & 0x3fU]);
+        encoded.push_back(index + 1U < bytes.size() ? alphabet[(group >> 6U) & 0x3fU] : '=');
+        encoded.push_back(index + 2U < bytes.size() ? alphabet[group & 0x3fU] : '=');
+    }
+    return encoded;
+}
+
+uint64_t UnixTimeMs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count());
+}
+
+std::string RoundTripDdl(const std::string& ddl) {
+    std::string round_tripped;
+    size_t begin = 0;
+    while (begin < ddl.size()) {
+        const size_t end = ddl.find(';', begin);
+        const size_t length = end == std::string::npos ? ddl.size() - begin : end - begin;
+        const std::string_view statement(ddl.data() + begin, length);
+        try {
+            round_tripped += PrintSql(SqlParser(statement).Parse());
+        } catch (const SqlError& error) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT,
+                          "Catalog DDL did not round-trip: " + std::string(statement) + " (" +
+                              error.what() + ")");
+        }
+        round_tripped += ';';
+        begin = end == std::string::npos ? ddl.size() : end + 1U;
+    }
+    return round_tripped;
+}
+
 ApiMiddleware::context& RequestContext(crow::App<ApiMiddleware>& app,
                                        const crow::request& request) {
     return app.get_context<ApiMiddleware>(request);
@@ -101,6 +145,25 @@ std::string ErrorCodeName(const DbError& error) {
             return "INVALID_ARGUMENT";
         default:
             return "INTERNAL";
+    }
+}
+
+void StoreSlowQuery(ApiServer::Impl& server, const std::string& request_id,
+                    std::string_view statement, uint64_t elapsed_us, std::string_view sql,
+                    std::string_view plan) {
+    SlowQuerySample sample;
+    sample.ts_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count());
+    sample.elapsed_us = elapsed_us;
+    sample.statement = statement;
+    sample.sql_preview = std::string(sql.substr(0, 200U));
+    sample.plan_summary = std::string(plan.substr(0, 200U));
+    sample.request_id = request_id;
+    std::lock_guard<std::mutex> lock(server.slow_queries_mutex);
+    server.slow_queries.push_back(std::move(sample));
+    while (server.slow_queries.size() > 100U) {
+        server.slow_queries.pop_front();
     }
 }
 
@@ -387,9 +450,11 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
                 slow_log["request_id"] = request_id;
                 slow_log["statement"] = SqlStatementName(statement.kind);
                 slow_log["elapsed_us"] = elapsed;
-                slow_log["sql"] = bound_sql;
+                slow_log["sql"] = sql.substr(0, 200U);
                 slow_log["plan"] = "(no execution plan for legacy statement)";
                 std::clog << slow_log.dump() << '\n';
+                StoreSlowQuery(server, request_id, SqlStatementName(statement.kind), elapsed, sql,
+                               "(no execution plan for legacy statement)");
             }
             if (result.rfind("Syntax error:", 0) == 0 || result.rfind("Unknown command.", 0) == 0) {
                 return fail(400, "SYNTAX_ERROR", result);
@@ -409,9 +474,11 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
 
     const auto started = std::chrono::steady_clock::now();
     try {
+        PageTouchScope page_touch_scope;
         SqlExecutionResult result = server.executor->ExecuteResult(
             bound_sql, std::chrono::milliseconds(server.config.statement_timeout_ms),
             server.config.max_result_rows);
+        const PageTouchCounts page_touches = page_touch_scope.Snapshot();
         const uint64_t elapsed = static_cast<uint64_t>(
             std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::microseconds>(
                                      std::chrono::steady_clock::now() - started)
@@ -423,13 +490,16 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
             slow_log["request_id"] = request_id;
             slow_log["statement"] = SqlStatementName(statement.kind);
             slow_log["elapsed_us"] = elapsed;
-            slow_log["sql"] = bound_sql;
-            slow_log["plan"] = result.plan.empty() ? "(no execution plan for this statement)"
-                                                   : result.plan;
+            const std::string plan =
+                result.plan.empty() ? "(no execution plan for this statement)" : result.plan;
+            slow_log["sql"] = sql.substr(0, 200U);
+            slow_log["plan"] = plan.substr(0, 200U);
             std::clog << slow_log.dump() << '\n';
+            StoreSlowQuery(server, request_id, SqlStatementName(statement.kind), elapsed, sql,
+                           plan);
         }
         const size_t result_limit = static_cast<size_t>(server.config.max_result_rows);
-        const bool truncated = result.rows.size() > result_limit;
+        const bool truncated = result.truncated || result.rows.size() > result_limit;
         if (truncated) {
             result.rows.resize(result_limit);
         }
@@ -459,6 +529,14 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
         response["rows_affected"] = result.rows_affected;
         response["truncated"] = truncated;
         response["elapsed_us"] = elapsed;
+        response["pages_touched"]["hit"] = page_touches.hit;
+        response["pages_touched"]["miss"] = page_touches.miss;
+        if (result.commit) {
+            response["commit"]["lsn"] = result.commit->lsn;
+            response["commit"]["pages_written"] = result.commit->pages_written;
+            response["commit"]["bytes"] = result.commit->bytes;
+            response["commit"]["fsync_us"] = result.commit->fsync_us;
+        }
         if (statement.kind == SqlStatementKind::EXPLAIN) {
             response["plan"] = result.plan;
         }
@@ -592,6 +670,8 @@ void AddHistogramJson(crow::json::wvalue& target, const HistogramSnapshot& snaps
 }  // namespace
 
 void ApiServer::Impl::RegisterRoutes() {
+    RegisterInspectorRoutes();
+
     CROW_ROUTE(app, "/<path>")
         .methods(crow::HTTPMethod::OPTIONS)([this](const crow::request& request,
                                                    crow::response& response,
@@ -704,6 +784,244 @@ void ApiServer::Impl::RegisterRoutes() {
                 return JsonResponse(200, response);
             });
 
+    CROW_ROUTE(app, "/api/v1/catalog")
+        .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
+            const std::vector<SqlTableMetadata> tables =
+                executor->GetTables(config.inspect_max_pages);
+            crow::json::wvalue response;
+            crow::json::wvalue::list table_list;
+            table_list.reserve(tables.size());
+            for (const SqlTableMetadata& table : tables) {
+                crow::json::wvalue item;
+                item["name"] = table.name;
+                item["row_estimate"] = table.row_estimate;
+                crow::json::wvalue::list columns;
+                std::string ddl = "CREATE TABLE " + table.name + " (";
+                for (size_t index = 0; index < table.schema.columns.size(); ++index) {
+                    const Column& column = table.schema.columns[index];
+                    if (index != 0U) {
+                        ddl += ", ";
+                    }
+                    ddl += column.name + " ";
+                    switch (column.type) {
+                        case ColumnType::INT:
+                            ddl += "INT";
+                            break;
+                        case ColumnType::BIGINT:
+                            ddl += "BIGINT";
+                            break;
+                        case ColumnType::DOUBLE:
+                            ddl += "DOUBLE";
+                            break;
+                        case ColumnType::BOOLEAN:
+                            ddl += "BOOLEAN";
+                            break;
+                        case ColumnType::VARCHAR:
+                            ddl += "VARCHAR(" + std::to_string(column.varchar_length) + ")";
+                            break;
+                    }
+                    const bool primary_key =
+                        table.schema.primary_key && *table.schema.primary_key == index;
+                    if (primary_key) {
+                        ddl += " PRIMARY KEY";
+                    } else if (index < table.not_null.size() && table.not_null[index]) {
+                        ddl += " NOT NULL";
+                    }
+                    if (column.references) {
+                        ddl += " REFERENCES " + column.references->table + "(" +
+                               column.references->column + ")";
+                    }
+
+                    crow::json::wvalue column_json;
+                    column_json["name"] = column.name;
+                    switch (column.type) {
+                        case ColumnType::INT:
+                            column_json["type"] = "INT";
+                            break;
+                        case ColumnType::BIGINT:
+                            column_json["type"] = "BIGINT";
+                            break;
+                        case ColumnType::DOUBLE:
+                            column_json["type"] = "DOUBLE";
+                            break;
+                        case ColumnType::BOOLEAN:
+                            column_json["type"] = "BOOLEAN";
+                            break;
+                        case ColumnType::VARCHAR:
+                            column_json["type"] = "VARCHAR";
+                            break;
+                    }
+                    column_json["length"] = column.varchar_length;
+                    column_json["nullable"] =
+                        index >= table.not_null.size() || !table.not_null[index];
+                    column_json["pk"] = primary_key;
+                    if (column.references) {
+                        column_json["references"]["table"] = column.references->table;
+                        column_json["references"]["column"] = column.references->column;
+                    } else {
+                        column_json["references"] = crow::json::wvalue(nullptr);
+                    }
+                    columns.push_back(std::move(column_json));
+                }
+                ddl += ")";
+                item["columns"] = std::move(columns);
+
+                crow::json::wvalue::list indexes;
+                for (const SqlIndexMetadata& index : table.indexes) {
+                    crow::json::wvalue index_json;
+                    index_json["name"] = index.name;
+                    crow::json::wvalue::list index_columns;
+                    index_columns.emplace_back(index.column);
+                    index_json["columns"] = std::move(index_columns);
+                    index_json["unique"] = index.unique;
+                    index_json["kind"] = "btree";
+                    index_json["meta_page"] = index.meta_page_id;
+                    index_json["height"] = index.height;
+                    index_json["pages"] = index.pages;
+                    index_json["entries"] = index.entries;
+                    index_json["leaf_pages"] = index.leaf_pages;
+                    index_json["fill_factor"] = index.fill_factor;
+                    indexes.push_back(std::move(index_json));
+                    ddl += "; CREATE ";
+                    if (index.unique) {
+                        ddl += "UNIQUE ";
+                    }
+                    ddl += "INDEX " + index.name + " ON " + table.name + " (" + index.column + ")";
+                }
+                item["indexes"] = std::move(indexes);
+                item["heap"]["first_page"] = table.heap.first_page;
+                item["heap"]["pages"] = table.heap.pages;
+                item["heap"]["tuples_estimate"] = table.heap.tuples;
+                item["heap"]["bytes_used"] = table.heap.bytes_used;
+                item["heap"]["bytes_free"] = table.heap.bytes_free;
+                item["ddl"] = RoundTripDdl(ddl);
+                table_list.push_back(std::move(item));
+            }
+            response["tables"] = std::move(table_list);
+            const std::string serialized = response.dump();
+            if (serialized.size() > 8U * 1024U * 1024U) {
+                ApiMiddleware::context& context = RequestContext(app, request);
+                return ErrorResponse(413, "INSPECT_RESULT_TOO_LARGE",
+                                     "Catalog response exceeds the 8 MiB inspection limit",
+                                     context.request_id);
+            }
+            return JsonResponse(200, response);
+        });
+
+    CROW_ROUTE(app, "/api/v1/snapshot")
+        .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
+            const auto inspection_gate = executor->AcquireInspectionGate();
+            (void)inspection_gate;
+            const BufferPoolStats pool_stats = bpm->SnapshotStats();
+            const std::vector<FrameInfo> frames = bpm->Snapshot();
+            const DiskStats disk_stats = disk_manager->Stats();
+            const MetricsRegistry& metrics = MetricsRegistry::Instance();
+            const ApiMiddleware& middleware = app.get_middleware<ApiMiddleware>();
+            const auto steady_now = std::chrono::steady_clock::now();
+            const uint64_t page_count = disk_manager->SizeInPages();
+            uint64_t dirty_count = 0;
+            uint64_t pinned_count = 0;
+            uint64_t resident_count = 0;
+            std::vector<uint8_t> states;
+            states.reserve(frames.size());
+            for (const FrameInfo& frame : frames) {
+                uint8_t state = frame.page_id == INVALID_PAGE_ID ? 0U : 1U;
+                state |= frame.pin_count > 0 ? 1U << 1U : 0U;
+                state |= frame.dirty ? 1U << 2U : 0U;
+                state |= frame.ref_bit ? 1U << 3U : 0U;
+                state |= static_cast<uint8_t>(frame.page_type) << 4U;
+                states.push_back(state);
+                resident_count += frame.page_id == INVALID_PAGE_ID ? 0U : 1U;
+                dirty_count += frame.dirty ? 1U : 0U;
+                pinned_count += frame.pin_count > 0 ? 1U : 0U;
+            }
+
+            double hit_ratio = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(stats_window_mutex);
+                if (previous_stats_at.time_since_epoch().count() != 0) {
+                    const uint64_t hits = pool_stats.hits >= previous_stats_hits
+                                              ? pool_stats.hits - previous_stats_hits
+                                              : 0U;
+                    const uint64_t misses = pool_stats.misses >= previous_stats_misses
+                                                ? pool_stats.misses - previous_stats_misses
+                                                : 0U;
+                    const uint64_t lookups = hits + misses;
+                    hit_ratio = lookups == 0U ? 0.0 : static_cast<double>(hits) / lookups;
+                }
+                previous_stats_hits = pool_stats.hits;
+                previous_stats_misses = pool_stats.misses;
+                previous_stats_at = steady_now;
+            }
+
+            crow::json::wvalue response;
+            response["ts_ms"] = (UnixTimeMs() / 1000U) * 1000U;
+            response["engine"]["version"] = CUSTOMRELATIONALDB_VERSION;
+            response["engine"]["git_sha"] = RELDB_GIT_SHA;
+            response["engine"]["format_version"] = 2;
+            response["engine"]["read_only"] = config.read_only;
+            response["engine"]["durability"] = config.durability;
+            response["engine"]["pool_policy"] = config.buffer_pool_policy;
+            response["engine"]["pool_frames"] = bpm->PoolSize();
+            response["engine"]["uptime_s"] =
+                std::chrono::duration_cast<std::chrono::seconds>(steady_now - middleware.started_at)
+                    .count();
+            response["engine"]["demo_mode"] = config.demo_load;
+            response["engine"]["next_reset_at"] = crow::json::wvalue(nullptr);
+
+            response["stats"]["queries"] = middleware.queries.load(std::memory_order_relaxed);
+            response["stats"]["rows_read"] = metrics.rows_read.Value();
+            response["stats"]["rows_written"] = metrics.rows_written.Value();
+            response["stats"]["errors"] = metrics.ErrorCount();
+            response["stats"]["index_scans"] = metrics.index_scans.Value();
+            response["stats"]["sequential_scans"] = metrics.sequential_scans.Value();
+
+            response["storage"]["file_size_bytes"] = disk_manager->FileSizeBytes();
+            response["storage"]["page_count"] = page_count;
+            response["storage"]["free_pages"] = bpm->FreePageCount();
+            response["storage"]["disk_reads"] = disk_stats.reads;
+            response["storage"]["disk_writes"] = disk_stats.writes;
+
+            response["pool"]["size"] = bpm->PoolSize();
+            response["pool"]["pinned"] = pinned_count;
+            response["pool"]["dirty"] = dirty_count;
+            response["pool"]["free"] = frames.size() - resident_count;
+            response["pool"]["hit_ratio_window"] = hit_ratio;
+
+            if (WriteAheadLog* wal = executor->Wal()) {
+                const WalRecoveryStats recovery = wal->LastRecoveryStats();
+                response["wal"]["size_bytes"] = wal->SizeBytes();
+                response["wal"]["last_lsn"] = wal->LastLSN();
+                response["wal"]["checkpoints"] = wal->CheckpointCount();
+                response["wal"]["last_checkpoint_unix_ms"] = wal->LastCheckpointUnixMs();
+                response["wal"]["recovery"]["ran"] = recovery.ran;
+                response["wal"]["recovery"]["records"] = recovery.records;
+                response["wal"]["recovery"]["commits"] = recovery.commits;
+                response["wal"]["recovery"]["pages_replayed"] = recovery.pages_replayed;
+            } else {
+                response["wal"]["size_bytes"] = 0;
+                response["wal"]["last_lsn"] = 0;
+                response["wal"]["checkpoints"] = 0;
+                response["wal"]["last_checkpoint_unix_ms"] = 0;
+                response["wal"]["recovery"]["ran"] = false;
+            }
+            response["activity"]["active"] = metrics.active_statements.Value();
+            response["activity"]["waiting"] = metrics.statement_waiters.Value();
+
+            std::string serialized = response.dump();
+            const std::string etag =
+                "\"" + std::to_string(std::hash<std::string>{}(serialized)) + "\"";
+            if (request.get_header_value("If-None-Match") == etag) {
+                crow::response not_modified(304);
+                not_modified.add_header("ETag", etag);
+                return not_modified;
+            }
+            crow::response result(200, std::move(serialized));
+            result.add_header("Content-Type", "application/json; charset=utf-8");
+            result.add_header("ETag", etag);
+            return result;
+        });
+
     CROW_ROUTE(app, "/api/v1/stats").methods(crow::HTTPMethod::GET)([this]() {
         const BufferPoolStats pool = bpm->SnapshotStats();
         const DiskStats disk = disk_manager->Stats();
@@ -763,6 +1081,7 @@ void ApiServer::Impl::RegisterRoutes() {
         response["active_statements"] = metrics.active_statements.Value();
         response["statement_waiters"] = metrics.statement_waiters.Value();
         response["rate_limited_requests"] = metrics.rate_limited_requests.Value();
+        response["inspect_rate_limited_requests"] = metrics.inspect_rate_limited_requests.Value();
         response["busy_rejections"] = metrics.busy_rejections.Value();
         crow::json::wvalue statements;
         crow::json::wvalue statement_durations;
@@ -824,25 +1143,43 @@ void ApiServer::Impl::RegisterRoutes() {
         return JsonResponse(200, response);
     });
     CROW_ROUTE(app, "/api/v1/stats/buffer_pool")
-        .methods(crow::HTTPMethod::GET)([this]() {
+        .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
+            const auto inspection_gate = executor->AcquireInspectionGate();
+            (void)inspection_gate;
             const std::vector<FrameInfo> frames = bpm->Snapshot();
             crow::json::wvalue response;
             response["pool_size"] = bpm->PoolSize();
             response["snapshot_size"] = frames.size();
             response["pinned_frames"] = bpm->pinned_frames();
-            crow::json::wvalue::list frame_list;
-            frame_list.reserve(frames.size());
-            for (const FrameInfo& frame : frames) {
-                crow::json::wvalue item;
-                item["frame_id"] = frame.frame_id;
-                item["page_id"] = frame.page_id;
-                item["pin_count"] = frame.pin_count;
-                item["dirty"] = frame.dirty;
-                item["ref_bit"] = frame.ref_bit;
-                item["clock_hand"] = frame.clock_hand;
-                frame_list.push_back(std::move(item));
+            if (request.url_params.get("format") != nullptr &&
+                std::string_view(request.url_params.get("format")) == "legacy") {
+                crow::json::wvalue::list frame_list;
+                frame_list.reserve(frames.size());
+                for (const FrameInfo& frame : frames) {
+                    crow::json::wvalue item;
+                    item["frame_id"] = frame.frame_id;
+                    item["page_id"] = frame.page_id;
+                    item["pin_count"] = frame.pin_count;
+                    item["dirty"] = frame.dirty;
+                    item["ref_bit"] = frame.ref_bit;
+                    item["clock_hand"] = frame.clock_hand;
+                    frame_list.push_back(std::move(item));
+                }
+                response["frames"] = std::move(frame_list);
+            } else {
+                std::vector<uint8_t> states;
+                states.reserve(frames.size());
+                for (const FrameInfo& frame : frames) {
+                    uint8_t state = frame.page_id == INVALID_PAGE_ID ? 0U : 1U;
+                    state |= frame.pin_count > 0 ? 1U << 1U : 0U;
+                    state |= frame.dirty ? 1U << 2U : 0U;
+                    state |= frame.ref_bit ? 1U << 3U : 0U;
+                    state |= static_cast<uint8_t>(frame.page_type) << 4U;
+                    states.push_back(state);
+                }
+                response["encoding"] = "base64-state-v1";
+                response["states_base64"] = Base64Encode(states);
             }
-            response["frames"] = std::move(frame_list);
             return JsonResponse(200, response);
         });
     CROW_ROUTE(app, "/api/v1/stats/storage").methods(crow::HTTPMethod::GET)([this]() {
@@ -960,8 +1297,10 @@ void ApiServer::Impl::RegisterRoutes() {
              << "# TYPE reldb_rejected_requests_total counter\n"
              << "reldb_rejected_requests_total{reason=\"rate_limit\"} "
              << metrics.rate_limited_requests.Value() << '\n'
-             << "reldb_rejected_requests_total{reason=\"busy\"} "
-             << metrics.busy_rejections.Value() << '\n'
+             << "reldb_rejected_requests_total{reason=\"busy\"} " << metrics.busy_rejections.Value()
+             << '\n'
+             << "reldb_rejected_requests_total{reason=\"inspect_rate_limit\"} "
+             << metrics.inspect_rate_limited_requests.Value() << '\n'
              << "# HELP reldb_buffer_pool_hits_total Buffer pool cache hits.\n"
              << "# TYPE reldb_buffer_pool_hits_total counter\n"
              << "reldb_buffer_pool_hits_total " << pool.hits << '\n'

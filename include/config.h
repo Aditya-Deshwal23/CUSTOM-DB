@@ -50,6 +50,10 @@ struct Config {
     uint64_t slow_query_ms{0};
     uint64_t drain_timeout_ms{5000};
     bool allow_unsafe{false};
+    bool inspect_enabled{true};
+    bool inspect_raw_bytes{false};
+    uint64_t inspect_max_nodes{200};
+    uint64_t inspect_max_pages{4096};
 
     static Config LoadFromEnvironment();
     std::string EffectiveJson() const;

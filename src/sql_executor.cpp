@@ -10,13 +10,14 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
 
-#include "sql_parser.h"
 #include "metrics/metrics.h"
+#include "sql_parser.h"
 
 namespace relational_db {
 
@@ -191,6 +192,235 @@ Value EvaluateLike(const Value& value, const Value& pattern) {
     }
     const bool matches = previous.back() != 0;
     return matches;
+}
+
+struct RowInspectionCursor {
+    Value order_value;
+    RID rid;
+};
+
+std::vector<uint8_t> CursorValueBytes(const Value& value) {
+    std::vector<uint8_t> bytes;
+    if (const auto* integer = std::get_if<int32_t>(&value)) {
+        const uint32_t bits = static_cast<uint32_t>(*integer);
+        for (size_t byte = 0; byte < sizeof(bits); ++byte) {
+            bytes.push_back(static_cast<uint8_t>(bits >> (byte * 8U)));
+        }
+    } else if (const auto* integer = std::get_if<int64_t>(&value)) {
+        const uint64_t bits = static_cast<uint64_t>(*integer);
+        for (size_t byte = 0; byte < sizeof(bits); ++byte) {
+            bytes.push_back(static_cast<uint8_t>(bits >> (byte * 8U)));
+        }
+    } else if (const auto* number = std::get_if<double>(&value)) {
+        uint64_t bits = 0;
+        std::memcpy(&bits, number, sizeof(bits));
+        for (size_t byte = 0; byte < sizeof(bits); ++byte) {
+            bytes.push_back(static_cast<uint8_t>(bits >> (byte * 8U)));
+        }
+    } else if (const auto* boolean = std::get_if<bool>(&value)) {
+        bytes.push_back(*boolean ? 1U : 0U);
+    } else if (const auto* text = std::get_if<std::string>(&value)) {
+        bytes.assign(text->begin(), text->end());
+    }
+    return bytes;
+}
+
+std::string HexEncode(const uint8_t* bytes, size_t length) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(length * 2U);
+    for (size_t index = 0; index < length; ++index) {
+        result.push_back(digits[bytes[index] >> 4U]);
+        result.push_back(digits[bytes[index] & 0x0fU]);
+    }
+    return result;
+}
+
+std::optional<std::vector<uint8_t>> HexDecode(std::string_view text) {
+    if (text.size() % 2U != 0U) {
+        return std::nullopt;
+    }
+    const auto nibble = [](char value) -> int {
+        if (value >= '0' && value <= '9') {
+            return value - '0';
+        }
+        if (value >= 'a' && value <= 'f') {
+            return value - 'a' + 10;
+        }
+        if (value >= 'A' && value <= 'F') {
+            return value - 'A' + 10;
+        }
+        return -1;
+    };
+    std::vector<uint8_t> result;
+    result.reserve(text.size() / 2U);
+    for (size_t index = 0; index < text.size(); index += 2U) {
+        const int high = nibble(text[index]);
+        const int low = nibble(text[index + 1U]);
+        if (high < 0 || low < 0) {
+            return std::nullopt;
+        }
+        result.push_back(static_cast<uint8_t>((high << 4U) | low));
+    }
+    return result;
+}
+
+template <typename Integer>
+bool ParseCursorInteger(std::string_view text, Integer& value) {
+    if (text.empty()) {
+        return false;
+    }
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
+}
+
+std::string EncodeRowCursor(std::string_view table, size_t order_column, bool descending,
+                            const Value& order_value, const RID& rid) {
+    const std::string table_hex =
+        HexEncode(reinterpret_cast<const uint8_t*>(table.data()), table.size());
+    const std::vector<uint8_t> value_bytes = CursorValueBytes(order_value);
+    return "v1|" + table_hex + "|" + std::to_string(order_column) + "|" + (descending ? "1" : "0") +
+           "|" + std::to_string(order_value.index()) + "|" +
+           (IsNullValue(order_value) ? "1" : "0") + "|" +
+           HexEncode(value_bytes.data(), value_bytes.size()) + "|" + std::to_string(rid.page_id) +
+           "|" + std::to_string(rid.slot);
+}
+
+std::optional<RowInspectionCursor> DecodeRowCursor(std::string_view text, std::string_view table,
+                                                   size_t order_column, bool descending,
+                                                   ColumnType column_type) {
+    std::array<std::string_view, 9> fields{};
+    size_t field_index = 0;
+    size_t begin = 0;
+    while (begin <= text.size() && field_index < fields.size()) {
+        const size_t separator = text.find('|', begin);
+        const size_t end = separator == std::string_view::npos ? text.size() : separator;
+        fields[field_index++] = text.substr(begin, end - begin);
+        if (separator == std::string_view::npos) {
+            begin = text.size() + 1U;
+            break;
+        }
+        begin = separator + 1U;
+    }
+    if (field_index != fields.size() || begin <= text.size() || fields[0] != "v1") {
+        return std::nullopt;
+    }
+    const std::string expected_table =
+        HexEncode(reinterpret_cast<const uint8_t*>(table.data()), table.size());
+    size_t parsed_column = 0;
+    size_t parsed_type = 0;
+    int32_t page_id = INVALID_PAGE_ID;
+    uint16_t slot = 0;
+    if (fields[1] != expected_table || !ParseCursorInteger(fields[2], parsed_column) ||
+        parsed_column != order_column || fields[3] != (descending ? "1" : "0") ||
+        !ParseCursorInteger(fields[4], parsed_type) || fields[5].size() != 1U ||
+        (fields[5] != "0" && fields[5] != "1") || !ParseCursorInteger(fields[7], page_id) ||
+        page_id <= 0 || !ParseCursorInteger(fields[8], slot)) {
+        return std::nullopt;
+    }
+    const bool is_null = fields[5] == "1";
+    const std::optional<std::vector<uint8_t>> bytes = HexDecode(fields[6]);
+    if (!bytes || (is_null && (parsed_type != 0U || !bytes->empty())) ||
+        (!is_null && parsed_type == 0U)) {
+        return std::nullopt;
+    }
+    Value value;
+    if (is_null) {
+        value = std::monostate{};
+    } else {
+        switch (column_type) {
+            case ColumnType::INT: {
+                if (parsed_type != 1U || bytes->size() != sizeof(uint32_t)) {
+                    return std::nullopt;
+                }
+                uint32_t bits = 0;
+                for (size_t byte = 0; byte < bytes->size(); ++byte) {
+                    bits |= static_cast<uint32_t>((*bytes)[byte]) << (byte * 8U);
+                }
+                int32_t parsed = 0;
+                std::memcpy(&parsed, &bits, sizeof(parsed));
+                value = parsed;
+                break;
+            }
+            case ColumnType::BIGINT: {
+                if (parsed_type != 2U || bytes->size() != sizeof(uint64_t)) {
+                    return std::nullopt;
+                }
+                uint64_t bits = 0;
+                for (size_t byte = 0; byte < bytes->size(); ++byte) {
+                    bits |= static_cast<uint64_t>((*bytes)[byte]) << (byte * 8U);
+                }
+                int64_t parsed = 0;
+                std::memcpy(&parsed, &bits, sizeof(parsed));
+                value = parsed;
+                break;
+            }
+            case ColumnType::DOUBLE: {
+                if (parsed_type != 3U || bytes->size() != sizeof(uint64_t)) {
+                    return std::nullopt;
+                }
+                uint64_t bits = 0;
+                for (size_t byte = 0; byte < bytes->size(); ++byte) {
+                    bits |= static_cast<uint64_t>((*bytes)[byte]) << (byte * 8U);
+                }
+                double parsed = 0;
+                std::memcpy(&parsed, &bits, sizeof(parsed));
+                value = parsed;
+                break;
+            }
+            case ColumnType::BOOLEAN:
+                if (parsed_type != 4U || bytes->size() != 1U || bytes->front() > 1U) {
+                    return std::nullopt;
+                }
+                value = bytes->front() != 0U;
+                break;
+            case ColumnType::VARCHAR:
+                if (parsed_type != 5U) {
+                    return std::nullopt;
+                }
+                value = std::string(bytes->begin(), bytes->end());
+                break;
+        }
+    }
+    return RowInspectionCursor{std::move(value), RID{page_id, slot}};
+}
+
+bool MatchesInspectFilter(const Row& row, const SqlInspectFilter& filter) {
+    if (filter.column >= row.size()) {
+        throw DbError(ErrorCode::INVALID_ARGUMENT, "Filter column is outside the table schema");
+    }
+    const Value& value = row[filter.column];
+    if (filter.operation == "ISNULL") {
+        return IsNullValue(value);
+    }
+    if (filter.operation == "LIKE") {
+        const Value matched = EvaluateLike(value, filter.value);
+        const auto* boolean = std::get_if<bool>(&matched);
+        return boolean != nullptr && *boolean;
+    }
+    const std::optional<int> comparison = CompareValues(value, filter.value);
+    if (!comparison) {
+        return false;
+    }
+    if (filter.operation == "=") {
+        return *comparison == 0;
+    }
+    if (filter.operation == "<>") {
+        return *comparison != 0;
+    }
+    if (filter.operation == "<") {
+        return *comparison < 0;
+    }
+    if (filter.operation == "<=") {
+        return *comparison <= 0;
+    }
+    if (filter.operation == ">") {
+        return *comparison > 0;
+    }
+    if (filter.operation == ">=") {
+        return *comparison >= 0;
+    }
+    throw DbError(ErrorCode::INVALID_ARGUMENT, "Unsupported table-row filter operator");
 }
 
 int64_t CheckedInteger(long double value) {
@@ -2551,7 +2781,8 @@ class SqlExecutionEngine::Impl {
             RID rid{};
             plan.root->Init();
             while (plan.root->Next(&tuple, &rid)) {
-                if (result.rows.size() > max_rows) {
+                if (result.rows.size() >= max_rows) {
+                    result.truncated = true;
                     break;
                 }
                 result.rows.push_back(DeserializeTuple(plan.output_schema, tuple));
@@ -2561,7 +2792,50 @@ class SqlExecutionEngine::Impl {
             return result;
         }
 
-        const std::string output = Execute(query, timeout);
+        const bool mutating = statement.kind == SqlStatementKind::CREATE_TABLE ||
+                              statement.kind == SqlStatementKind::DROP_TABLE ||
+                              statement.kind == SqlStatementKind::CREATE_INDEX ||
+                              statement.kind == SqlStatementKind::INSERT ||
+                              statement.kind == SqlStatementKind::UPDATE ||
+                              statement.kind == SqlStatementKind::DELETE;
+        std::string output;
+        if (mutating) {
+            StatementScope scope(statement_gate_, true, std::chrono::steady_clock::now() + timeout);
+            std::unique_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+            catalog_.Reload();
+            if (wal_ == nullptr) {
+                throw DbError(ErrorCode::INVALID_ARGUMENT,
+                              "SQL writes require an Executor constructed with a WAL");
+            }
+            std::shared_ptr<TxnContext> transaction;
+            try {
+                transaction = buffer_pool_->BeginTransaction(*wal_);
+                ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
+                                         &scope.Cancellation(), nullptr};
+                output = ExecuteWrite(statement, context);
+                transaction->Commit();
+                result.commit = transaction->CommitInfo();
+                RecordWrittenRows(output);
+                buffer_pool_->AssertNoPinsHeld();
+            } catch (const DbError&) {
+                if (transaction) {
+                    transaction->Rollback();
+                }
+                catalog_.Reload();
+                buffer_pool_->AssertNoPinsHeld();
+                throw;
+            } catch (const std::exception&) {
+                if (transaction) {
+                    transaction->Rollback();
+                }
+                catalog_.Reload();
+                buffer_pool_->AssertNoPinsHeld();
+                throw;
+            }
+        } else {
+            output = Execute(query, timeout);
+        }
+        result.message = output;
         const std::string suffix = " row(s) affected";
         const size_t marker = output.find(suffix);
         if (marker != std::string::npos) {
@@ -2682,13 +2956,16 @@ class SqlExecutionEngine::Impl {
         }
     }
 
-    std::vector<SqlTableMetadata> GetTables() {
+    std::vector<SqlTableMetadata> GetTables(uint64_t max_pages) {
         StatementScope scope(statement_gate_, false);
         std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
         std::vector<SqlTableMetadata> result;
         result.reserve(catalog_.Tables().size());
+        uint64_t pages_left = max_pages;
         for (const auto& entry : catalog_.Tables()) {
-            result.push_back(ReadTableMetadata(*entry));
+            SqlTableMetadata metadata = ReadTableMetadata(*entry, pages_left);
+            pages_left -= metadata.inspection_pages;
+            result.push_back(std::move(metadata));
         }
         buffer_pool_->AssertNoPinsHeld();
         return result;
@@ -2701,26 +2978,289 @@ class SqlExecutionEngine::Impl {
         if (table == nullptr) {
             return std::nullopt;
         }
-        SqlTableMetadata result = ReadTableMetadata(*table);
+        SqlTableMetadata result = ReadTableMetadata(*table, 4096);
         buffer_pool_->AssertNoPinsHeld();
         return result;
     }
 
+    SqlIndexTreeInspection InspectIndexTree(std::string_view name, uint64_t max_nodes) {
+        StatementScope scope(statement_gate_, false);
+        std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        for (const auto& table : catalog_.Tables()) {
+            for (const CatalogIndex& index : table->indexes) {
+                if (index.name == name) {
+                    SqlIndexTreeInspection result{index.tree->InspectTree(max_nodes),
+                                                  table->schema.columns[index.column].type};
+                    buffer_pool_->AssertNoPinsHeld();
+                    return result;
+                }
+            }
+        }
+        throw DbError(ErrorCode::UNKNOWN_TABLE, "Unknown index: " + std::string(name));
+    }
+
+    std::optional<SqlIndexPageOwner> FindIndexPageOwner(page_id_t page_id, uint64_t max_pages) {
+        if (max_pages == 0U) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT,
+                          "Index page owner lookup requires a positive page limit");
+        }
+        StatementScope scope(statement_gate_, false);
+        std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        uint64_t pages_left = max_pages;
+        for (const auto& table : catalog_.Tables()) {
+            for (const CatalogIndex& index : table->indexes) {
+                if (index.meta_page_id == page_id) {
+                    buffer_pool_->AssertNoPinsHeld();
+                    return SqlIndexPageOwner{index.name, table->schema.columns[index.column].name,
+                                             table->schema.columns[index.column].type};
+                }
+                if (pages_left == 0U) {
+                    throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                                  "Index page owner lookup exceeds INSPECT_MAX_PAGES", page_id);
+                }
+                uint64_t pages_read = 0;
+                const bool found = index.tree->ContainsPage(page_id, pages_left, pages_read);
+                pages_left -= pages_read;
+                if (found) {
+                    buffer_pool_->AssertNoPinsHeld();
+                    return SqlIndexPageOwner{index.name, table->schema.columns[index.column].name,
+                                             table->schema.columns[index.column].type};
+                }
+            }
+        }
+        buffer_pool_->AssertNoPinsHeld();
+        return std::nullopt;
+    }
+
+    std::pair<SqlIndexTree::LookupTraceResult, std::vector<SqlIndexTree::TraceDecision>> TraceIndex(
+        std::string_view name, std::string_view key_text) {
+        StatementScope scope(statement_gate_, false);
+        std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        for (const auto& table : catalog_.Tables()) {
+            for (const CatalogIndex& index : table->indexes) {
+                if (index.name != name) {
+                    continue;
+                }
+                const ColumnType type = table->schema.columns[index.column].type;
+                Value value;
+                if (type == ColumnType::INT) {
+                    int32_t parsed = 0;
+                    const auto conversion =
+                        std::from_chars(key_text.data(), key_text.data() + key_text.size(), parsed);
+                    if (conversion.ec != std::errc{} ||
+                        conversion.ptr != key_text.data() + key_text.size()) {
+                        throw DbError(ErrorCode::INVALID_ARGUMENT,
+                                      "Index key must be a valid 32-bit integer");
+                    }
+                    value = parsed;
+                } else if (type == ColumnType::BIGINT) {
+                    int64_t parsed = 0;
+                    const auto conversion =
+                        std::from_chars(key_text.data(), key_text.data() + key_text.size(), parsed);
+                    if (conversion.ec != std::errc{} ||
+                        conversion.ptr != key_text.data() + key_text.size()) {
+                        throw DbError(ErrorCode::INVALID_ARGUMENT,
+                                      "Index key must be a valid 64-bit integer");
+                    }
+                    value = parsed;
+                } else if (type == ColumnType::DOUBLE) {
+                    double parsed = 0;
+                    const auto conversion =
+                        std::from_chars(key_text.data(), key_text.data() + key_text.size(), parsed);
+                    if (conversion.ec != std::errc{} ||
+                        conversion.ptr != key_text.data() + key_text.size()) {
+                        throw DbError(ErrorCode::INVALID_ARGUMENT,
+                                      "Index key must be a valid number");
+                    }
+                    value = parsed;
+                } else if (type == ColumnType::BOOLEAN) {
+                    if (key_text == "true") {
+                        value = true;
+                    } else if (key_text == "false") {
+                        value = false;
+                    } else {
+                        throw DbError(ErrorCode::INVALID_ARGUMENT,
+                                      "Index key must be true or false");
+                    }
+                } else {
+                    value = std::string(key_text);
+                }
+                const IndexKey16 search_key = IndexEntryKey(value, 0);
+                std::vector<SqlIndexTree::TraceDecision> decisions;
+                const auto trace = index.tree->TraceLookup(
+                    search_key, [&decisions](const SqlIndexTree::TraceDecision& decision) {
+                        decisions.push_back(decision);
+                    });
+                buffer_pool_->AssertNoPinsHeld();
+                return {trace, std::move(decisions)};
+            }
+        }
+        throw DbError(ErrorCode::UNKNOWN_TABLE, "Unknown index: " + std::string(name));
+    }
+
+    SqlInspectedRows InspectRows(std::string_view table_name, uint64_t limit,
+                                 std::string_view after, size_t order_column, bool descending,
+                                 const std::vector<SqlInspectFilter>& filters, uint64_t max_pages,
+                                 std::chrono::milliseconds timeout) {
+        constexpr uint64_t kMaxRowsExamined = 100000;
+        if (limit == 0U || limit > 500U || filters.size() > 16U || max_pages == 0U) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT,
+                          "Table row inspection parameters exceed configured bounds");
+        }
+        StatementScope scope(statement_gate_, false, std::chrono::steady_clock::now() + timeout);
+        std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        const CatalogTable* table = catalog_.FindTable(table_name);
+        if (table == nullptr) {
+            throw DbError(ErrorCode::UNKNOWN_TABLE, "Unknown table: " + std::string(table_name));
+        }
+        if (order_column >= table->schema.columns.size()) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT, "Order column is outside the table schema");
+        }
+        std::optional<RowInspectionCursor> cursor;
+        if (!after.empty()) {
+            cursor = DecodeRowCursor(after, table_name, order_column, descending,
+                                     table->schema.columns[order_column].type);
+            if (!cursor) {
+                throw DbError(ErrorCode::INVALID_ARGUMENT, "Invalid or incompatible row cursor");
+            }
+        }
+        for (const SqlInspectFilter& filter : filters) {
+            if (filter.column >= table->schema.columns.size()) {
+                throw DbError(ErrorCode::INVALID_ARGUMENT, "Filter column is outside the schema");
+            }
+        }
+
+        const auto compare_rows = [order_column, descending](const SqlInspectedRow& left,
+                                                             const SqlInspectedRow& right) {
+            int order = 0;
+            const Value& left_value = left.values[order_column];
+            const Value& right_value = right.values[order_column];
+            if (IsNullValue(left_value) != IsNullValue(right_value)) {
+                order = IsNullValue(left_value) ? -1 : 1;
+            } else if (!IsNullValue(left_value)) {
+                order = CompareValues(left_value, right_value).value_or(0);
+            }
+            if (descending) {
+                order = -order;
+            }
+            if (order != 0) {
+                return order < 0;
+            }
+            return left.rid.page_id < right.rid.page_id ||
+                   (left.rid.page_id == right.rid.page_id && left.rid.slot < right.rid.slot);
+        };
+        const auto is_after_cursor = [order_column, descending,
+                                      &cursor](const SqlInspectedRow& row) {
+            if (!cursor) {
+                return true;
+            }
+            int order = 0;
+            const Value& value = row.values[order_column];
+            if (IsNullValue(value) != IsNullValue(cursor->order_value)) {
+                order = IsNullValue(value) ? -1 : 1;
+            } else if (!IsNullValue(value)) {
+                order = CompareValues(value, cursor->order_value).value_or(0);
+            }
+            if (descending) {
+                order = -order;
+            }
+            if (order != 0) {
+                return order > 0;
+            }
+            return row.rid.page_id > cursor->rid.page_id ||
+                   (row.rid.page_id == cursor->rid.page_id && row.rid.slot > cursor->rid.slot);
+        };
+        std::multiset<SqlInspectedRow, decltype(compare_rows)> selected(compare_rows);
+        static constexpr uint64_t kMaxSelectedRows = 501;
+        table->heap->ScanWithoutReplacement(
+            max_pages, kMaxRowsExamined,
+            [&scope, &table, &filters, &selected, &is_after_cursor, limit](const RID& rid,
+                                                                           const Tuple& tuple) {
+                scope.Cancellation().Check();
+                Row values = DeserializeTuple(table->schema, tuple);
+                for (const SqlInspectFilter& filter : filters) {
+                    if (!MatchesInspectFilter(values, filter)) {
+                        return;
+                    }
+                }
+                SqlInspectedRow row{rid, std::move(values)};
+                if (!is_after_cursor(row)) {
+                    return;
+                }
+                selected.insert(std::move(row));
+                if (selected.size() > std::min<uint64_t>(limit + 1U, kMaxSelectedRows)) {
+                    selected.erase(std::prev(selected.end()));
+                }
+            });
+
+        SqlInspectedRows result;
+        if (selected.size() > limit) {
+            auto cursor_row = selected.begin();
+            std::advance(cursor_row, static_cast<std::ptrdiff_t>(limit - 1U));
+            result.next_cursor = EncodeRowCursor(table_name, order_column, descending,
+                                                 cursor_row->values[order_column], cursor_row->rid);
+        }
+        result.rows.reserve(std::min<uint64_t>(limit, selected.size()));
+        auto current = selected.begin();
+        for (uint64_t row = 0; row < limit && current != selected.end(); ++row, ++current) {
+            result.rows.push_back(*current);
+        }
+        buffer_pool_->AssertNoPinsHeld();
+        return result;
+    }
+
+    std::optional<SqlHeapPageInspection> InspectHeapPage(page_id_t page_id, uint64_t max_pages) {
+        StatementScope scope(statement_gate_, false);
+        std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        uint64_t pages_left = max_pages;
+        for (const auto& table : catalog_.Tables()) {
+            if (pages_left == 0U) {
+                throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                              "Heap page schema lookup exceeds INSPECT_MAX_PAGES", page_id);
+            }
+            TableHeapPageInspection heap_page = table->heap->InspectPage(page_id, pages_left);
+            pages_left -= heap_page.pages_read;
+            if (!heap_page.found) {
+                continue;
+            }
+            SqlHeapPageInspection result;
+            result.table = table->name;
+            result.header_page = heap_page.header_page;
+            result.column_names.reserve(table->schema.columns.size());
+            for (const Column& column : table->schema.columns) {
+                result.column_names.push_back(column.name);
+            }
+            result.rows.reserve(heap_page.tuples.size());
+            for (auto& tuple : heap_page.tuples) {
+                result.rows.push_back(SqlInspectedRow{
+                    RID{page_id, tuple.first}, DeserializeTuple(table->schema, tuple.second)});
+            }
+            buffer_pool_->AssertNoPinsHeld();
+            return result;
+        }
+        buffer_pool_->AssertNoPinsHeld();
+        return std::nullopt;
+    }
+
    private:
-    static SqlTableMetadata ReadTableMetadata(const CatalogTable& table) {
+    static SqlTableMetadata ReadTableMetadata(const CatalogTable& table, uint64_t max_pages) {
         SqlTableMetadata metadata;
         metadata.name = table.name;
         metadata.schema = table.schema;
+        metadata.not_null = table.not_null;
+        metadata.heap = table.heap->Inspect(max_pages);
+        metadata.inspection_pages = metadata.heap.pages;
+        metadata.row_estimate = metadata.heap.tuples;
         metadata.indexes.reserve(table.indexes.size());
         for (const CatalogIndex& index : table.indexes) {
-            metadata.indexes.push_back(SqlIndexMetadata{
-                index.name, table.schema.columns[index.column].name, index.unique});
-        }
-        TableIterator iterator = table.heap->Begin();
-        RID rid{};
-        Tuple tuple;
-        while (iterator.Next(rid, tuple)) {
-            ++metadata.row_estimate;
+            const SqlIndexTree::InspectionSummary summary =
+                index.tree->InspectSummary(max_pages - metadata.inspection_pages);
+            metadata.inspection_pages += summary.pages;
+            metadata.indexes.push_back(
+                SqlIndexMetadata{index.name, table.schema.columns[index.column].name,
+                                 table.schema.columns[index.column].type, index.unique,
+                                 index.meta_page_id, index.tree->Height(), summary.pages,
+                                 summary.entries, summary.leaf_pages, summary.fill_factor});
         }
         return metadata;
     }
@@ -2974,12 +3514,42 @@ std::vector<SqlExecutionResult> SqlExecutionEngine::ExecuteBatch(
     return impl_->ExecuteBatch(queries, timeout, max_rows, failed_statement_index);
 }
 
-std::vector<SqlTableMetadata> SqlExecutionEngine::GetTables() {
-    return impl_->GetTables();
+std::vector<SqlTableMetadata> SqlExecutionEngine::GetTables(uint64_t max_pages) {
+    return impl_->GetTables(max_pages);
 }
 
 std::optional<SqlTableMetadata> SqlExecutionEngine::GetTable(std::string_view name) {
     return impl_->GetTable(name);
+}
+
+SqlIndexTreeInspection SqlExecutionEngine::InspectIndexTree(std::string_view name,
+                                                            uint64_t max_nodes) {
+    return impl_->InspectIndexTree(name, max_nodes);
+}
+
+std::pair<SqlIndexTree::LookupTraceResult, std::vector<SqlIndexTree::TraceDecision>>
+SqlExecutionEngine::TraceIndex(std::string_view name, std::string_view key) {
+    return impl_->TraceIndex(name, key);
+}
+
+SqlInspectedRows SqlExecutionEngine::InspectRows(std::string_view table, uint64_t limit,
+                                                 std::string_view after, size_t order_column,
+                                                 bool descending,
+                                                 const std::vector<SqlInspectFilter>& filters,
+                                                 uint64_t max_pages,
+                                                 std::chrono::milliseconds timeout) {
+    return impl_->InspectRows(table, limit, after, order_column, descending, filters, max_pages,
+                              timeout);
+}
+
+std::optional<SqlHeapPageInspection> SqlExecutionEngine::InspectHeapPage(page_id_t page_id,
+                                                                         uint64_t max_pages) {
+    return impl_->InspectHeapPage(page_id, max_pages);
+}
+
+std::optional<SqlIndexPageOwner> SqlExecutionEngine::FindIndexPageOwner(page_id_t page_id,
+                                                                        uint64_t max_pages) {
+    return impl_->FindIndexPageOwner(page_id, max_pages);
 }
 
 }  // namespace relational_db

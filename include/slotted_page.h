@@ -37,6 +37,7 @@ public:
  page_id_t GetNextPageId() const;
  void SetNextPageId(page_id_t next_page_id);
  uint16_t GetNumSlots() const;
+ Slot GetSlot(uint16_t slot_id) const;
  uint16_t GetFreeSpacePtr() const;
  uint16_t GetFreeSpaceRemaining() const;
  bool HasTombstones() const;
@@ -46,7 +47,6 @@ private:
  char* writable_data_;
 
  void EnsureWritable() const;
- Slot GetSlot(uint16_t slot_id) const;
  void SetSlot(uint16_t slot_id, const Slot& slot);
  uint16_t ReadU16(size_t offset) const;
  void WriteU16(size_t offset, uint16_t value);

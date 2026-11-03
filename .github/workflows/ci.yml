@@ -61,6 +61,9 @@ jobs:
         env:
           RELDB_SERVER_BINARY: ${{ github.workspace }}/build/relational_db
         run: python -m pytest -q tests/api
+      - name: Verify warm snapshot p99
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Release'
+        run: python tools/benchmark_snapshot.py --binary build/relational_db --samples 100 --max-p99-ms 2
       - name: Run real-binary dashboard browser smoke test
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         env:

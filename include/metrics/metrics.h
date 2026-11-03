@@ -21,6 +21,7 @@ enum class HttpRoute : size_t {
     BUFFER_POOL_STATS,
     STORAGE_STATS,
     BATCH,
+    INSPECTOR,
     OTHER,
     COUNT
 };
@@ -229,10 +230,18 @@ class LabeledHistogram {
 };
 
 struct MetricsRegistry {
-    static constexpr std::array<std::string_view, 11> kHttpRouteLabels{
-        "unknown", "/health", "/api/query", "/api/v1/query", "/api/metrics",
-        "/metrics", "/api/v1/stats", "/api/v1/stats/buffer_pool",
-        "/api/v1/stats/storage", "/api/v1/batch", "other"};
+    static constexpr std::array<std::string_view, 12> kHttpRouteLabels{"unknown",
+                                                                       "/health",
+                                                                       "/api/v1/query",
+                                                                       "/api/query",
+                                                                       "/api/metrics",
+                                                                       "/metrics",
+                                                                       "/api/v1/stats",
+                                                                       "/api/v1/stats/buffer_pool",
+                                                                       "/api/v1/stats/storage",
+                                                                       "/api/v1/batch",
+                                                                       "/api/v1/inspector",
+                                                                       "other"};
     static constexpr std::array<std::string_view, 16> kHttpStatusLabels{
         "200", "201", "204", "400", "401", "403", "404", "409",
         "413", "415", "422", "429", "500", "503", "507", "other"};
@@ -267,6 +276,7 @@ struct MetricsRegistry {
     Counter index_scans;
     Counter sequential_scans;
     Counter rate_limited_requests;
+    Counter inspect_rate_limited_requests;
     Counter busy_rejections;
     Counter wal_bytes;
     Counter wal_commits;

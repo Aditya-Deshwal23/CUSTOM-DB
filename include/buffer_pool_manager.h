@@ -48,10 +48,36 @@ struct BufferPoolStats {
 struct FrameInfo {
     frame_id_t frame_id{0};
     page_id_t page_id{INVALID_PAGE_ID};
+    PageType page_type{PageType::HEAP};
     int pin_count{0};
     bool dirty{false};
     bool ref_bit{false};
     size_t clock_hand{0};
+};
+
+struct PageTouchCounts {
+    uint64_t hit{0};
+    uint64_t miss{0};
+};
+
+class PageTouchScope {
+   public:
+    PageTouchScope();
+    PageTouchScope(const PageTouchScope&) = delete;
+    PageTouchScope& operator=(const PageTouchScope&) = delete;
+    ~PageTouchScope();
+
+    PageTouchCounts Snapshot() const noexcept {
+        return counts_;
+    }
+
+   private:
+    friend class BufferPoolManager;
+    static void RecordHit() noexcept;
+    static void RecordMiss() noexcept;
+
+    PageTouchScope* previous_{nullptr};
+    PageTouchCounts counts_;
 };
 
 class BufferPoolManager {
@@ -92,6 +118,8 @@ class BufferPoolManager {
         return disk_manager_->SizeInPages();
     }
     void VerifyDiskPages() const;
+    void ReadPageWithoutReplacement(page_id_t page_id, char* page_data, PageType& type,
+                                    uint16_t& flags, uint64_t& lsn);
 
     uint64_t GetHits() const {
         return hits_.load(std::memory_order_relaxed);

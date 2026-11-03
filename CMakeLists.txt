@@ -116,6 +116,7 @@ string(TIMESTAMP RELDB_BUILD_TIME "%Y-%m-%dT%H:%M:%SZ" UTC)
 target_sources(relational_db PRIVATE
   src/api/server.cpp
   src/api/routes.cpp
+  src/api/inspector.cpp
   src/api/batch.cpp
   src/api/middleware.cpp
   src/api/json.cpp

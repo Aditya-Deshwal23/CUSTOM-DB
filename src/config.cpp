@@ -220,17 +220,20 @@ Config Config::LoadFromEnvironment() {
     config.slow_query_ms = ReadUnsigned("SLOW_QUERY_MS", config.slow_query_ms, true);
     config.drain_timeout_ms = ReadUnsigned("DRAIN_TIMEOUT_MS", config.drain_timeout_ms);
     config.allow_unsafe = ReadBoolean("ALLOW_UNSAFE", config.allow_unsafe);
+    config.inspect_enabled = ReadBoolean("INSPECT_ENABLED", config.inspect_enabled);
+    config.inspect_raw_bytes = ReadBoolean("INSPECT_RAW_BYTES", config.inspect_raw_bytes);
+    config.inspect_max_nodes = ReadUnsigned("INSPECT_MAX_NODES", config.inspect_max_nodes);
+    config.inspect_max_pages = ReadUnsigned("INSPECT_MAX_PAGES", config.inspect_max_pages);
 
     if (config.durability == "off" && !config.allow_unsafe) {
         throw std::invalid_argument("DURABILITY=off requires ALLOW_UNSAFE=1");
     }
-    if (config.max_body_bytes > 16U * 1024U * 1024U ||
-        config.max_sql_bytes > 16U * 1024U * 1024U ||
+    if (config.max_body_bytes > 16U * 1024U * 1024U || config.max_sql_bytes > 16U * 1024U * 1024U ||
         config.max_result_rows > MAX_RESULT_ROWS || config.statement_timeout_ms > 600000U ||
         config.wal_sync_interval_ms > 600000U || config.slow_query_ms > 3600000U ||
-        config.rate_limit_rps > 1000000.0 ||
-        config.rate_limit_burst < 1.0 || config.rate_limit_burst > 1000000.0 ||
-        config.drain_timeout_ms > 600000U) {
+        config.rate_limit_rps > 1000000.0 || config.rate_limit_burst < 1.0 ||
+        config.rate_limit_burst > 1000000.0 || config.drain_timeout_ms > 600000U ||
+        config.inspect_max_nodes > 200U || config.inspect_max_pages > 4096U) {
         throw std::invalid_argument("Configured limits are outside their supported ranges");
     }
     return config;
@@ -240,13 +243,12 @@ std::string Config::EffectiveJson() const {
     return "{\"PORT\":" + std::to_string(port) + ",\"DB_PATH\":\"" + EscapeJson(db_path) +
            "\",\"WAL_PATH\":\"" + EscapeJson(wal_path) +
            "\",\"BUFFER_POOL_FRAMES\":" + std::to_string(buffer_pool_frames) +
-           ",\"BUFFER_POOL_POLICY\":\"" + EscapeJson(buffer_pool_policy) +
-           "\",\"DURABILITY\":\"" + EscapeJson(durability) +
-           "\",\"WAL_MAX_BYTES\":" + std::to_string(wal_max_bytes) +
+           ",\"BUFFER_POOL_POLICY\":\"" + EscapeJson(buffer_pool_policy) + "\",\"DURABILITY\":\"" +
+           EscapeJson(durability) + "\",\"WAL_MAX_BYTES\":" + std::to_string(wal_max_bytes) +
            ",\"WAL_SYNC_INTERVAL_MS\":" + std::to_string(wal_sync_interval_ms) +
-           ",\"READ_ONLY\":" + (read_only ? "true" : "false") +
-           ",\"API_KEY\":\"" + (api_key.empty() ? "" : "[redacted]") +
-           "\",\"CORS_ORIGINS\":" + [&]() {
+           ",\"READ_ONLY\":" + (read_only ? "true" : "false") + ",\"API_KEY\":\"" +
+           (api_key.empty() ? "" : "[redacted]") + "\",\"CORS_ORIGINS\":" +
+           [&]() {
                std::string json = "[";
                for (size_t index = 0; index < cors_origins.size(); ++index) {
                    if (index != 0U) {
@@ -266,7 +268,11 @@ std::string Config::EffectiveJson() const {
            EscapeJson(log_level) + "\",\"DEMO_LOAD\":" + (demo_load ? "true" : "false") +
            ",\"SLOW_QUERY_MS\":" + std::to_string(slow_query_ms) +
            ",\"DRAIN_TIMEOUT_MS\":" + std::to_string(drain_timeout_ms) +
-           ",\"ALLOW_UNSAFE\":" + (allow_unsafe ? "true" : "false") + "}";
+           ",\"ALLOW_UNSAFE\":" + (allow_unsafe ? "true" : "false") +
+           ",\"INSPECT_ENABLED\":" + (inspect_enabled ? "true" : "false") +
+           ",\"INSPECT_RAW_BYTES\":" + (inspect_raw_bytes ? "true" : "false") +
+           ",\"INSPECT_MAX_NODES\":" + std::to_string(inspect_max_nodes) +
+           ",\"INSPECT_MAX_PAGES\":" + std::to_string(inspect_max_pages) + "}";
 }
 
 }  // namespace relational_db

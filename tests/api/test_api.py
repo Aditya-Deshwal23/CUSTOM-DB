@@ -209,7 +209,9 @@ def test_sql_result_parameters_tables_and_stats(api_server):
     assert stats["statements"]["update"] - baseline["statements"]["update"] == 1
     assert stats["rows_read"] - baseline["rows_read"] == 2
     assert stats["rows_written"] - baseline["rows_written"] == 2
-    buffer_status, buffer_stats, _ = request_json(api_server, "/api/v1/stats/buffer_pool")
+    buffer_status, buffer_stats, _ = request_json(
+        api_server, "/api/v1/stats/buffer_pool?format=legacy"
+    )
     storage_status, storage_stats, _ = request_json(api_server, "/api/v1/stats/storage")
     assert buffer_status == 200 and buffer_stats["snapshot_size"] == buffer_stats["pool_size"]
     assert storage_status == 200

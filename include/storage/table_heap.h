@@ -31,6 +31,21 @@ struct RID {
     }
 };
 
+struct TableHeapInspection {
+    page_id_t first_page{INVALID_PAGE_ID};
+    uint64_t pages{0};
+    uint64_t tuples{0};
+    uint64_t bytes_used{0};
+    uint64_t bytes_free{0};
+};
+
+struct TableHeapPageInspection {
+    bool found{false};
+    bool header_page{false};
+    uint64_t pages_read{0};
+    std::vector<std::pair<uint16_t, Tuple>> tuples;
+};
+
 class TableIterator {
    public:
     TableIterator() = default;
@@ -65,6 +80,11 @@ class TableHeap {
     bool Delete(const RID& rid);
     std::optional<RID> Update(const RID& rid, const Tuple& tuple);
     TableIterator Begin() const;
+    TableHeapInspection Inspect(uint64_t max_pages = 4096) const;
+    TableHeapPageInspection InspectPage(page_id_t target_page, uint64_t max_pages) const;
+    uint64_t ScanWithoutReplacement(
+        uint64_t max_pages, uint64_t max_rows,
+        const std::function<void(const RID&, const Tuple&)>& visitor) const;
     void Drop();
 
    private:

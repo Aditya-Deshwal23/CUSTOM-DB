@@ -29,6 +29,12 @@ bool IsSafeRequestId(const std::string& value) {
 }
 
 HttpRoute RouteMetric(std::string_view path) {
+    if (path == "/api/v1/snapshot" || path == "/api/v1/catalog" ||
+        path == "/api/v1/stats/history" || path == "/api/v1/slow-queries" ||
+        path.rfind("/api/v1/inspect/", 0) == 0 ||
+        (path.rfind("/api/v1/tables/", 0) == 0 && path.find("/rows") != std::string_view::npos)) {
+        return HttpRoute::INSPECTOR;
+    }
     if (path == "/health") {
         return HttpRoute::HEALTH;
     }
@@ -59,6 +65,10 @@ HttpRoute RouteMetric(std::string_view path) {
     return HttpRoute::OTHER;
 }
 
+bool IsInspectorRoute(std::string_view path) {
+    return RouteMetric(path) == HttpRoute::INSPECTOR;
+}
+
 std::string MethodName(crow::HTTPMethod method) {
     switch (method) {
         case crow::HTTPMethod::GET:
@@ -82,10 +92,15 @@ std::string MethodName(crow::HTTPMethod method) {
 
 }  // namespace
 
-bool ApiMiddleware::ConsumeToken(const std::string& client_ip) {
+bool ApiMiddleware::ConsumeToken(const std::string& client_ip, bool inspect) {
+    constexpr double kInspectRate = 5.0;
+    constexpr double kInspectBurst = 10.0;
+    const std::string bucket_key = inspect ? "inspect:" + client_ip : client_ip;
+    const double rate = inspect ? kInspectRate : config.rate_limit_rps;
+    const double burst = inspect ? kInspectBurst : config.rate_limit_burst;
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(buckets_mutex_);
-    auto iterator = buckets_.find(client_ip);
+    auto iterator = buckets_.find(bucket_key);
     if (iterator == buckets_.end()) {
         if (buckets_.size() >= 4096U) {
             const auto oldest = std::min_element(
@@ -96,15 +111,17 @@ bool ApiMiddleware::ConsumeToken(const std::string& client_ip) {
                 buckets_.erase(oldest);
             }
         }
-        iterator = buckets_.emplace(client_ip, Bucket{config.rate_limit_burst, now}).first;
+        iterator = buckets_.emplace(bucket_key, Bucket{burst, now}).first;
     }
     Bucket& bucket = iterator->second;
     const double elapsed = std::chrono::duration<double>(now - bucket.updated).count();
-    bucket.tokens =
-        std::min(config.rate_limit_burst, bucket.tokens + elapsed * config.rate_limit_rps);
+    bucket.tokens = std::min(burst, bucket.tokens + elapsed * rate);
     bucket.updated = now;
     if (bucket.tokens < 1.0) {
         MetricsRegistry::Instance().rate_limited_requests.Increment();
+        if (inspect) {
+            MetricsRegistry::Instance().inspect_rate_limited_requests.Increment();
+        }
         return false;
     }
     bucket.tokens -= 1.0;
@@ -151,7 +168,7 @@ void ApiMiddleware::before_handle(crow::request& request, crow::response& respon
     if (request.method == crow::HTTPMethod::OPTIONS) {
         const std::string origin = request.get_header_value("Origin");
         const std::string method = request.get_header_value("Access-Control-Request-Method");
-        if (!ConsumeToken(ctx.client_ip)) {
+        if (!ConsumeToken(ctx.client_ip, IsInspectorRoute(request.url))) {
             response =
                 ErrorResponse(429, "RATE_LIMITED", "Request rate limit exceeded", ctx.request_id);
             response.add_header("Retry-After", "1");
@@ -211,7 +228,23 @@ void ApiMiddleware::before_handle(crow::request& request, crow::response& respon
         }
     }
 
-    if (!ConsumeToken(ctx.client_ip)) {
+    const bool inspector_route = IsInspectorRoute(request.url);
+    if (inspector_route && !config.inspect_enabled) {
+        response =
+            ErrorResponse(404, "NOT_FOUND", "Inspector endpoint is disabled", ctx.request_id);
+        complete_early();
+        return;
+    }
+    if (inspector_route && !config.api_key.empty() &&
+        !ApiKeyMatches(config.api_key, request.get_header_value("X-API-Key"))) {
+        response =
+            ErrorResponse(401, "API_KEY_REQUIRED",
+                          "A valid X-API-Key is required for inspector routes", ctx.request_id);
+        complete_early();
+        return;
+    }
+
+    if (!ConsumeToken(ctx.client_ip, inspector_route)) {
         response =
             ErrorResponse(429, "RATE_LIMITED", "Request rate limit exceeded", ctx.request_id);
         response.add_header("Retry-After", "1");

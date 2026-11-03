@@ -413,6 +413,280 @@ class BPlusTree {
         return capacity == 0 ? 0.0 : static_cast<double>(occupied) / capacity;
     }
 
+    struct InspectionSummary {
+        uint64_t pages{0};
+        uint64_t leaf_pages{0};
+        uint64_t entries{0};
+        double fill_factor{0.0};
+    };
+
+    struct InspectionNode {
+        page_id_t page_id{INVALID_PAGE_ID};
+        uint16_t level{0};
+        uint16_t count{0};
+        std::optional<KeyType> minimum;
+        std::optional<KeyType> maximum;
+        std::vector<page_id_t> children;
+        page_id_t next{INVALID_PAGE_ID};
+        double fill_pct{0.0};
+    };
+
+    struct InspectionTree {
+        std::vector<InspectionNode> nodes;
+        bool truncated{false};
+    };
+
+    struct TraceDecision {
+        page_id_t page_id{INVALID_PAGE_ID};
+        uint16_t level{0};
+        size_t slot{0};
+        std::string decision;
+    };
+
+    using TraceSink = std::function<void(const TraceDecision&)>;
+
+    struct LookupTraceResult {
+        std::optional<ValueType> value;
+        page_id_t leaf_page_id{INVALID_PAGE_ID};
+        size_t leaf_slot{0};
+    };
+
+    InspectionTree InspectTree(uint64_t max_nodes) const {
+        if (max_nodes == 0U) {
+            throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                          "Index tree inspection requires at least one node", meta_page_id_);
+        }
+        InspectionTree result;
+        if (root_page_id_ == INVALID_PAGE_ID) {
+            return result;
+        }
+        std::vector<std::pair<page_id_t, uint16_t>> pending{{root_page_id_, height_}};
+        std::unordered_set<page_id_t> visited;
+        while (!pending.empty()) {
+            if (result.nodes.size() == max_nodes) {
+                result.truncated = true;
+                break;
+            }
+            const auto [page_id, level] = pending.back();
+            pending.pop_back();
+            if (page_id <= 0 || !visited.insert(page_id).second) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid or cyclic B+ tree page graph",
+                              page_id);
+            }
+            BytePage page_data{};
+            PageType type = PageType::HEAP;
+            uint16_t flags = 0;
+            uint64_t lsn = 0;
+            buffer_pool_->ReadPageWithoutReplacement(page_id, page_data.data(), type, flags, lsn);
+            InspectionNode node;
+            node.page_id = page_id;
+            node.level = level;
+            if (type == PageType::BTREE_LEAF) {
+                const auto* leaf = reinterpret_cast<const LeafLayout*>(page_data.data());
+                const uint16_t count = ReadCount(leaf->count.data());
+                if (count > kLeafCapacity || level != 1U) {
+                    throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree leaf layout", page_id);
+                }
+                node.count = count;
+                if (count != 0U) {
+                    node.minimum = DecodeKey(leaf->entries[0]);
+                    node.maximum = DecodeKey(leaf->entries[count - 1U]);
+                }
+                node.next = bpt_detail::ReadPageId(leaf->next_page_id.data());
+                node.fill_pct =
+                    100.0 * static_cast<double>(count) / static_cast<double>(kLeafCapacity);
+            } else if (type == PageType::BTREE_INTERNAL) {
+                const auto* internal = reinterpret_cast<const InternalLayout*>(page_data.data());
+                const uint16_t count = ReadCount(internal->count.data());
+                if (count > kInternalKeyCapacity || level <= 1U) {
+                    throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree internal layout",
+                                  page_id);
+                }
+                node.count = count;
+                if (count != 0U) {
+                    node.minimum = DecodeKey(internal->entries[1]);
+                    node.maximum = DecodeKey(internal->entries[count]);
+                }
+                node.fill_pct =
+                    100.0 * static_cast<double>(count) / static_cast<double>(kInternalKeyCapacity);
+                node.children.reserve(static_cast<size_t>(count) + 1U);
+                for (uint16_t child = 0; child <= count; ++child) {
+                    const page_id_t child_page =
+                        bpt_detail::ReadPageId(internal->entries[child].child_page_id.data());
+                    node.children.push_back(child_page);
+                    pending.emplace_back(child_page, static_cast<uint16_t>(level - 1U));
+                }
+            } else {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Unexpected page in B+ tree", page_id);
+            }
+            result.nodes.push_back(std::move(node));
+        }
+        return result;
+    }
+
+    LookupTraceResult TraceLookup(const KeyType& key, const TraceSink& sink) const {
+        LookupTraceResult result;
+        if (root_page_id_ == INVALID_PAGE_ID) {
+            return result;
+        }
+        page_id_t page_id = root_page_id_;
+        for (uint16_t level = height_; level > 1U; --level) {
+            BytePage page_data{};
+            PageType type = PageType::HEAP;
+            uint16_t flags = 0;
+            uint64_t lsn = 0;
+            buffer_pool_->ReadPageWithoutReplacement(page_id, page_data.data(), type, flags, lsn);
+            if (type != PageType::BTREE_INTERNAL) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree internal page", page_id);
+            }
+            const auto* internal = reinterpret_cast<const InternalLayout*>(page_data.data());
+            const uint16_t count = ReadCount(internal->count.data());
+            if (count > kInternalKeyCapacity) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree internal entry count",
+                              page_id);
+            }
+            const size_t child = InternalChildIndex(internal, count, key);
+            if (sink) {
+                sink(TraceDecision{page_id, level, child, "child"});
+            }
+            page_id = bpt_detail::ReadPageId(internal->entries[child].child_page_id.data());
+        }
+
+        BytePage page_data{};
+        PageType type = PageType::HEAP;
+        uint16_t flags = 0;
+        uint64_t lsn = 0;
+        buffer_pool_->ReadPageWithoutReplacement(page_id, page_data.data(), type, flags, lsn);
+        if (type != PageType::BTREE_LEAF) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Expected B+ tree leaf page", page_id);
+        }
+        const auto* leaf = reinterpret_cast<const LeafLayout*>(page_data.data());
+        const uint16_t count = ReadCount(leaf->count.data());
+        if (count > kLeafCapacity) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree leaf entry count", page_id);
+        }
+        const size_t slot = LeafLowerBound(leaf, count, key);
+        result.leaf_page_id = page_id;
+        result.leaf_slot = slot;
+        if (slot < count) {
+            const KeyType entry_key = DecodeKey(leaf->entries[slot]);
+            bool matches = KeysEqual(entry_key, key);
+            if constexpr (std::is_same<KeyType, IndexKey16>::value) {
+                matches =
+                    std::equal(key.bytes.begin(), key.bytes.begin() + 8, entry_key.bytes.begin());
+            }
+            if (matches) {
+                result.value = ValueCodec::Decode(leaf->entries[slot].value.data());
+            }
+        }
+        if (sink) {
+            sink(TraceDecision{page_id, 1, slot, result.value ? "found" : "not_found"});
+        }
+        return result;
+    }
+
+    bool ContainsPage(page_id_t target_page, uint64_t max_pages, uint64_t& pages_read) const {
+        pages_read = 0;
+        if (target_page == meta_page_id_) {
+            return true;
+        }
+        if (max_pages == 0U || root_page_id_ == INVALID_PAGE_ID) {
+            return false;
+        }
+        std::vector<page_id_t> pending{root_page_id_};
+        std::unordered_set<page_id_t> visited;
+        while (!pending.empty()) {
+            const page_id_t page_id = pending.back();
+            pending.pop_back();
+            if (page_id <= 0 || !visited.insert(page_id).second) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid or cyclic B+ tree page graph",
+                              page_id);
+            }
+            if (pages_read >= max_pages) {
+                throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                              "Index page owner lookup exceeds INSPECT_MAX_PAGES", target_page);
+            }
+            BytePage page_data{};
+            PageType type = PageType::HEAP;
+            uint16_t flags = 0;
+            uint64_t lsn = 0;
+            buffer_pool_->ReadPageWithoutReplacement(page_id, page_data.data(), type, flags, lsn);
+            ++pages_read;
+            if (page_id == target_page) {
+                return true;
+            }
+            if (type == PageType::BTREE_INTERNAL) {
+                const auto* internal = reinterpret_cast<const InternalLayout*>(page_data.data());
+                const uint16_t count = ReadCount(internal->count.data());
+                if (count > kInternalKeyCapacity) {
+                    throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree internal entry count",
+                                  page_id);
+                }
+                for (uint16_t child = 0; child <= count; ++child) {
+                    pending.push_back(
+                        bpt_detail::ReadPageId(internal->entries[child].child_page_id.data()));
+                }
+            } else if (type != PageType::BTREE_LEAF) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Unexpected page in B+ tree", page_id);
+            }
+        }
+        return false;
+    }
+
+    InspectionSummary InspectSummary(uint64_t max_pages = 4096) const {
+        InspectionSummary summary;
+        if (root_page_id_ == INVALID_PAGE_ID) {
+            return summary;
+        }
+
+        std::vector<page_id_t> pending{root_page_id_};
+        std::unordered_set<page_id_t> visited;
+        while (!pending.empty()) {
+            const page_id_t page_id = pending.back();
+            pending.pop_back();
+            if (page_id <= 0 || !visited.insert(page_id).second) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid or cyclic B+ tree page graph",
+                              page_id);
+            }
+            if (summary.pages >= max_pages) {
+                throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                              "Index inspection exceeds INSPECT_MAX_PAGES", page_id);
+            }
+            BytePage page_data{};
+            PageType type = PageType::HEAP;
+            uint16_t flags = 0;
+            uint64_t lsn = 0;
+            buffer_pool_->ReadPageWithoutReplacement(page_id, page_data.data(), type, flags, lsn);
+            ++summary.pages;
+            if (type == PageType::BTREE_LEAF) {
+                const auto* leaf = reinterpret_cast<const LeafLayout*>(page_data.data());
+                const uint16_t count = ReadCount(leaf->count.data());
+                if (count > kLeafCapacity) {
+                    throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree leaf entry count",
+                                  page_id);
+                }
+                summary.entries += count;
+                ++summary.leaf_pages;
+            } else if (type == PageType::BTREE_INTERNAL) {
+                const auto* internal = reinterpret_cast<const InternalLayout*>(page_data.data());
+                const uint16_t count = ReadCount(internal->count.data());
+                if (count > kInternalKeyCapacity) {
+                    throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid B+ tree internal entry count",
+                                  page_id);
+                }
+                for (uint16_t child = 0; child <= count; ++child) {
+                    pending.push_back(
+                        bpt_detail::ReadPageId(internal->entries[child].child_page_id.data()));
+                }
+            } else {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Unexpected page in B+ tree", page_id);
+            }
+        }
+        const uint64_t capacity = summary.leaf_pages * kLeafCapacity;
+        summary.fill_factor = capacity == 0 ? 0.0 : static_cast<double>(summary.entries) / capacity;
+        return summary;
+    }
+
     std::optional<ValueType> GetValue(const KeyType& key) const {
         if (IsEmpty()) {
             return std::nullopt;

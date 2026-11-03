@@ -1,13 +1,16 @@
 #ifndef RELDB_API_INTERNAL_H
 #define RELDB_API_INTERNAL_H
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -19,6 +22,21 @@
 namespace relational_db {
 
 using ApiConfig = Config;
+constexpr size_t kHistorySeriesCount = 41;
+
+struct ApiHistorySample {
+    uint64_t ts_ms{0};
+    std::array<uint64_t, kHistorySeriesCount> values{};
+};
+
+struct SlowQuerySample {
+    uint64_t ts_ms{0};
+    uint64_t elapsed_us{0};
+    std::string statement;
+    std::string sql_preview;
+    std::string plan_summary;
+    std::string request_id;
+};
 
 struct ApiRequestContext {
     std::string request_id;
@@ -49,7 +67,7 @@ class ApiMiddleware {
         std::chrono::steady_clock::time_point updated;
     };
 
-    bool ConsumeToken(const std::string& client_ip);
+    bool ConsumeToken(const std::string& client_ip, bool inspect = false);
     std::mutex buckets_mutex_;
     std::unordered_map<std::string, Bucket> buckets_;
     std::mutex active_requests_mutex_;
@@ -60,8 +78,12 @@ class ApiMiddleware {
 struct ApiServer::Impl {
     Impl(std::shared_ptr<BufferPoolManager> buffer_pool, std::shared_ptr<IDiskManager> disk,
          std::shared_ptr<Executor> query_executor, std::string static_path, Config service_config);
+    ~Impl();
 
     void RegisterRoutes();
+    void RegisterInspectorRoutes();
+    void StartMetricsSampler();
+    void SampleMetrics();
 
     std::shared_ptr<BufferPoolManager> bpm;
     std::shared_ptr<IDiskManager> disk_manager;
@@ -75,6 +97,13 @@ struct ApiServer::Impl {
     uint64_t previous_stats_hits{0};
     uint64_t previous_stats_misses{0};
     std::chrono::steady_clock::time_point previous_stats_at{};
+    std::mutex history_mutex;
+    std::condition_variable history_changed;
+    std::deque<ApiHistorySample> history;
+    std::atomic<bool> stop_sampler{false};
+    std::thread sampler_thread;
+    std::mutex slow_queries_mutex;
+    std::deque<SlowQuerySample> slow_queries;
 };
 
 crow::response JsonResponse(int status, const crow::json::wvalue& value);

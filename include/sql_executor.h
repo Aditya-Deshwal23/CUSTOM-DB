@@ -1,6 +1,7 @@
 #ifndef RELDB_SQL_EXECUTOR_H
 #define RELDB_SQL_EXECUTOR_H
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -49,18 +50,73 @@ struct SqlExecutionResult {
     uint64_t rows_affected{0};
     bool truncated{false};
     std::string plan;
+    std::optional<WalCommitInfo> commit;
+};
+
+struct SqlInspectFilter {
+    size_t column{0};
+    std::string operation;
+    Value value;
+};
+
+struct SqlInspectedRow {
+    RID rid;
+    Row values;
+};
+
+struct SqlInspectedRows {
+    std::vector<SqlInspectedRow> rows;
+    std::string next_cursor;
+};
+
+struct SqlHeapPageInspection {
+    std::string table;
+    bool header_page{false};
+    std::vector<std::string> column_names;
+    std::vector<SqlInspectedRow> rows;
+};
+
+struct SqlIndexPageOwner {
+    std::string name;
+    std::string column;
+    ColumnType column_type{ColumnType::INT};
+};
+
+struct SqlIndexTreeInspection {
+    SqlIndexTree::InspectionTree tree;
+    ColumnType column_type{ColumnType::INT};
+};
+
+struct InspectedPage {
+    page_id_t page_id{INVALID_PAGE_ID};
+    PageType type{PageType::HEAP};
+    uint16_t flags{0};
+    uint64_t lsn{0};
+    bool crc_ok{false};
+    std::string read_error;
+    std::array<char, PAGE_DATA_SIZE> body{};
 };
 
 struct SqlIndexMetadata {
     std::string name;
     std::string column;
+    ColumnType column_type{ColumnType::INT};
     bool unique{false};
+    page_id_t meta_page_id{INVALID_PAGE_ID};
+    uint16_t height{0};
+    uint64_t pages{0};
+    uint64_t entries{0};
+    uint64_t leaf_pages{0};
+    double fill_factor{0.0};
 };
 
 struct SqlTableMetadata {
     std::string name;
     Schema schema;
+    std::vector<bool> not_null;
     uint64_t row_estimate{0};
+    TableHeapInspection heap;
+    uint64_t inspection_pages{0};
     std::vector<SqlIndexMetadata> indexes;
 };
 
@@ -101,8 +157,17 @@ class SqlExecutionEngine {
                                                  std::chrono::milliseconds timeout,
                                                  uint64_t max_rows,
                                                  size_t& failed_statement_index);
-    std::vector<SqlTableMetadata> GetTables();
+    std::vector<SqlTableMetadata> GetTables(uint64_t max_pages);
     std::optional<SqlTableMetadata> GetTable(std::string_view name);
+    SqlIndexTreeInspection InspectIndexTree(std::string_view name, uint64_t max_nodes);
+    std::pair<SqlIndexTree::LookupTraceResult, std::vector<SqlIndexTree::TraceDecision>> TraceIndex(
+        std::string_view name, std::string_view key);
+    SqlInspectedRows InspectRows(std::string_view table, uint64_t limit, std::string_view after,
+                                 size_t order_column, bool descending,
+                                 const std::vector<SqlInspectFilter>& filters, uint64_t max_pages,
+                                 std::chrono::milliseconds timeout);
+    std::optional<SqlHeapPageInspection> InspectHeapPage(page_id_t page_id, uint64_t max_pages);
+    std::optional<SqlIndexPageOwner> FindIndexPageOwner(page_id_t page_id, uint64_t max_pages);
 
    private:
     class Impl;

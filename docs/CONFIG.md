@@ -17,7 +17,7 @@ the table says otherwise.
 | `WAL_MAX_BYTES` | `16777216` | Positive integer bytes, `1`–`18446744073709551615`. |
 | `WAL_SYNC_INTERVAL_MS` | `1000` | Integer `1`–`600000`. Used by `normal` mode. |
 | `READ_ONLY` | `0` | `0` or `1`; in read-only mode SQL mutation statements are rejected. |
-| `API_KEY` | unset | Empty or at most 4096 bytes. When set, SQL writes and administrative checkpoints require the `X-API-Key` header. |
+| `API_KEY` | unset | Empty or at most 4096 bytes. When set, SQL writes, administrative checkpoints, and inspector routes require the `X-API-Key` header. |
 | `CORS_ORIGINS` | empty | Comma-separated HTTP(S) origins without paths, queries, or fragments; empty disables cross-origin access. |
 | `MAX_BODY_BYTES` | `65536` | Integer `1`–`16777216`. |
 | `MAX_SQL_BYTES` | `16384` | Integer `1`–`16777216`. |
@@ -29,6 +29,10 @@ the table says otherwise.
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `off`. |
 | `DEMO_LOAD` | `0` | `0` or `1`; enables the optional in-process point-lookup workload. |
 | `SLOW_QUERY_MS` | `0` (disabled) | Integer `0`–`3600000`. |
+| `INSPECT_ENABLED` | `1` | `0` disables the new read-only inspector endpoints. |
+| `INSPECT_RAW_BYTES` | `0` | `1` permits raw page bytes and tuple payloads where an inspector endpoint supports them. |
+| `INSPECT_MAX_NODES` | `200` | Maximum nodes emitted by index-tree inspection; range `1`–`200`. |
+| `INSPECT_MAX_PAGES` | `4096` | Maximum pages read or emitted by inspection endpoints; range `1`–`4096`. |
 | `DRAIN_TIMEOUT_MS` | `5000` | Integer `1`–`600000`; bounds the graceful in-flight request drain. |
 | `ALLOW_UNSAFE` | `0` | `0` or `1`; must be `1` to select `DURABILITY=off`. |
 

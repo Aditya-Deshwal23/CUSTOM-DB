@@ -337,6 +337,158 @@ TableIterator TableHeap::Begin() const {
     return TableIterator(buffer_pool_, ReadHeader().first);
 }
 
+TableHeapInspection TableHeap::Inspect(uint64_t max_pages) const {
+    if (max_pages == 0U) {
+        throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                      "Table heap inspection exceeds INSPECT_MAX_PAGES", header_page_id_);
+    }
+    std::array<char, PAGE_DATA_SIZE> body{};
+    PageType type = PageType::HEAP;
+    uint16_t flags = 0;
+    uint64_t lsn = 0;
+    buffer_pool_.ReadPageWithoutReplacement(header_page_id_, body.data(), type, flags, lsn);
+    if (type != PageType::HEAP) {
+        throw DbError(ErrorCode::PAGE_CORRUPT, "Table heap header has an invalid page type",
+                      header_page_id_);
+    }
+
+    TableHeapInspection summary;
+    summary.pages = 1;
+    summary.first_page = DecodePageId(ReadU32(body.data(), 0));
+    page_id_t page_id = summary.first_page;
+    std::unordered_set<page_id_t> visited;
+    while (page_id != INVALID_PAGE_ID) {
+        if (summary.pages >= max_pages || !visited.insert(page_id).second) {
+            throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                          "Table heap inspection exceeds INSPECT_MAX_PAGES", page_id);
+        }
+        buffer_pool_.ReadPageWithoutReplacement(page_id, body.data(), type, flags, lsn);
+        if (type != PageType::HEAP) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Table heap contains a non-heap page", page_id);
+        }
+        const SlottedPage page(body.data());
+        const uint16_t slots = page.GetNumSlots();
+        for (uint16_t slot_id = 0; slot_id < slots; ++slot_id) {
+            std::vector<std::byte> tuple;
+            if (page.ReadTuple(slot_id, tuple)) {
+                ++summary.tuples;
+            }
+        }
+        const uint64_t free_bytes = page.GetFreeSpaceRemaining();
+        summary.bytes_free += free_bytes;
+        summary.bytes_used += PAGE_DATA_SIZE - free_bytes;
+        page_id = page.GetNextPageId();
+        ++summary.pages;
+    }
+    return summary;
+}
+
+TableHeapPageInspection TableHeap::InspectPage(page_id_t target_page, uint64_t max_pages) const {
+    if (target_page < 0 || max_pages == 0U) {
+        throw DbError(ErrorCode::INVALID_ARGUMENT,
+                      "Heap page inspection requires a valid page and positive limit", target_page);
+    }
+    TableHeapPageInspection result;
+    std::array<char, PAGE_DATA_SIZE> body{};
+    PageType type = PageType::HEAP;
+    uint16_t flags = 0;
+    uint64_t lsn = 0;
+    buffer_pool_.ReadPageWithoutReplacement(header_page_id_, body.data(), type, flags, lsn);
+    ++result.pages_read;
+    if (type != PageType::HEAP) {
+        throw DbError(ErrorCode::PAGE_CORRUPT, "Table heap header has an invalid page type",
+                      header_page_id_);
+    }
+    if (target_page == header_page_id_) {
+        result.found = true;
+        result.header_page = true;
+        return result;
+    }
+    page_id_t page_id = DecodePageId(ReadU32(body.data(), 0));
+    std::unordered_set<page_id_t> visited;
+    while (page_id != INVALID_PAGE_ID) {
+        if (result.pages_read >= max_pages) {
+            throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                          "Heap page lookup exceeds INSPECT_MAX_PAGES", target_page);
+        }
+        if (page_id <= 0 || !visited.insert(page_id).second) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Invalid or cyclic table heap page chain",
+                          page_id);
+        }
+        buffer_pool_.ReadPageWithoutReplacement(page_id, body.data(), type, flags, lsn);
+        ++result.pages_read;
+        if (type != PageType::HEAP) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Table heap contains a non-heap page", page_id);
+        }
+        if (page_id == target_page) {
+            const SlottedPage page(body.data());
+            const uint16_t slots = page.GetNumSlots();
+            result.tuples.reserve(slots);
+            for (uint16_t slot = 0; slot < slots; ++slot) {
+                Tuple tuple;
+                if (page.ReadTuple(slot, tuple)) {
+                    result.tuples.emplace_back(slot, std::move(tuple));
+                }
+            }
+            result.found = true;
+            return result;
+        }
+        page_id = SlottedPage(body.data()).GetNextPageId();
+    }
+    return result;
+}
+
+uint64_t TableHeap::ScanWithoutReplacement(
+    uint64_t max_pages, uint64_t max_rows,
+    const std::function<void(const RID&, const Tuple&)>& visitor) const {
+    if (max_pages == 0U || max_rows == 0U) {
+        throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                      "Table row inspection requires positive page and row limits",
+                      header_page_id_);
+    }
+    std::array<char, PAGE_DATA_SIZE> body{};
+    PageType type = PageType::HEAP;
+    uint16_t flags = 0;
+    uint64_t lsn = 0;
+    buffer_pool_.ReadPageWithoutReplacement(header_page_id_, body.data(), type, flags, lsn);
+    if (type != PageType::HEAP) {
+        throw DbError(ErrorCode::PAGE_CORRUPT, "Table heap header has an invalid page type",
+                      header_page_id_);
+    }
+
+    page_id_t page_id = DecodePageId(ReadU32(body.data(), 0));
+    std::unordered_set<page_id_t> visited;
+    uint64_t pages = 1;
+    uint64_t rows = 0;
+    while (page_id != INVALID_PAGE_ID) {
+        if (pages >= max_pages || page_id <= 0 || !visited.insert(page_id).second) {
+            throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                          "Table row inspection exceeds configured page limits", page_id);
+        }
+        buffer_pool_.ReadPageWithoutReplacement(page_id, body.data(), type, flags, lsn);
+        if (type != PageType::HEAP) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Table heap contains a non-heap page", page_id);
+        }
+        const SlottedPage page(body.data());
+        const uint16_t slot_count = page.GetNumSlots();
+        for (uint16_t slot = 0; slot < slot_count; ++slot) {
+            Tuple tuple;
+            if (!page.ReadTuple(slot, tuple)) {
+                continue;
+            }
+            if (rows == max_rows) {
+                throw DbError(ErrorCode::RESULT_LIMIT_EXCEEDED,
+                              "Table row inspection exceeds configured row limits", page_id);
+            }
+            visitor(RID{page_id, slot}, tuple);
+            ++rows;
+        }
+        page_id = page.GetNextPageId();
+        ++pages;
+    }
+    return rows;
+}
+
 void TableHeap::Drop() {
     const auto links = ReadHeader();
     std::vector<page_id_t> pages;

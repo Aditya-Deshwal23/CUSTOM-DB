@@ -37,8 +37,21 @@ class Executor {
                                                  std::chrono::milliseconds timeout,
                                                  uint64_t max_rows,
                                                  size_t& failed_statement_index);
-    std::vector<SqlTableMetadata> GetTables();
+    std::vector<SqlTableMetadata> GetTables(uint64_t max_pages = 4096);
     std::optional<SqlTableMetadata> GetTable(std::string_view name);
+    std::vector<InspectedPage> InspectPages(page_id_t from, uint64_t count);
+    SqlIndexTreeInspection InspectIndexTree(std::string_view name, uint64_t max_nodes);
+    std::pair<SqlIndexTree::LookupTraceResult, std::vector<SqlIndexTree::TraceDecision>> TraceIndex(
+        std::string_view name, std::string_view key);
+    SqlInspectedRows InspectRows(std::string_view table, uint64_t limit, std::string_view after,
+                                 size_t order_column, bool descending,
+                                 const std::vector<SqlInspectFilter>& filters, uint64_t max_pages,
+                                 std::chrono::milliseconds timeout);
+    std::optional<SqlHeapPageInspection> InspectHeapPage(page_id_t page_id, uint64_t max_pages);
+    std::optional<SqlIndexPageOwner> FindIndexPageOwner(page_id_t page_id, uint64_t max_pages);
+    std::unique_ptr<StatementScope> AcquireInspectionGate();
+    WalInspectionSnapshot InspectWalRecords(size_t limit,
+                                            std::optional<uint64_t> before_lsn = std::nullopt);
     WriteAheadLog* Wal() const noexcept {
         return wal_;
     }

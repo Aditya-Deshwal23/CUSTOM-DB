@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.error
 import urllib.request
+from urllib.parse import quote, urlencode
 
 
 def allocate_port():
@@ -17,12 +18,19 @@ def allocate_port():
         return listener.getsockname()[1]
 
 
-def send(base_url, body, content_type="application/json", timeout=30):
+def send(
+    base_url,
+    body,
+    content_type="application/json",
+    timeout=30,
+    path="/api/v1/query",
+    method="POST",
+):
     request = urllib.request.Request(
-        base_url + "/api/v1/query",
-        data=body,
+        base_url + path,
+        data=body if method == "POST" else None,
         headers={"Content-Type": content_type},
-        method="POST",
+        method=method,
     )
     try:
         response = urllib.request.urlopen(request, timeout=timeout)
@@ -84,27 +92,68 @@ def main():
 
             requests = []
             for index in range(args.iterations):
-                if index % 3 == 0:
+                if index % 8 == 0:
+                    malformed = generator.choice(
+                        ["", "-1", "0", "9999999999999999999", "NaN", "x", "9" * 512]
+                    )
+                    inspector_paths = (
+                        "/api/v1/inspect/pages?"
+                        + urlencode({"from": malformed, "count": malformed}),
+                        "/api/v1/inspect/pages/"
+                        + quote(malformed, safe="")
+                        + "?"
+                        + urlencode({"raw": malformed}),
+                        "/api/v1/inspect/wal?"
+                        + urlencode({"limit": malformed, "before_lsn": malformed}),
+                        "/api/v1/stats/history?"
+                        + urlencode({"window_s": malformed, "step_s": malformed}),
+                        "/api/v1/tables/missing/rows?"
+                        + urlencode(
+                            {
+                                "limit": malformed,
+                                "after": malformed,
+                                "order": malformed,
+                                "filter": malformed,
+                            }
+                        ),
+                        "/api/v1/inspect/indexes/missing/tree?"
+                        + urlencode({"max_nodes": malformed}),
+                        "/api/v1/inspect/indexes/missing/trace?"
+                        + urlencode({"key": malformed}),
+                    )
+                    requests.append(
+                        (
+                            inspector_paths[generator.randrange(len(inspector_paths))],
+                            b"",
+                            "application/json",
+                            "GET",
+                        )
+                    )
+                elif index % 3 == 0:
                     query = "".join(
                         generator.choice(alphabet)
                         for _ in range(generator.randrange(0, 384))
                     )
                     requests.append(
                         (
+                            "/api/v1/query",
                             json.dumps(
                                 {"sql": query, "params": [generator.randrange(-1000, 1000)]}
                             ).encode(),
                             "application/json",
+                            "POST",
                         )
                     )
                 elif index % 3 == 1:
                     requests.append(
                         (
+                            "/api/v1/query",
                             bytes(
                                 generator.randrange(0, 256)
                                 for _ in range(generator.randrange(0, 128))
                             ),
                             "application/json",
+                            "POST",
                         )
                     )
                 else:
@@ -117,12 +166,24 @@ def main():
                             {"sql": "SELECT * FROM absent WHERE id = $1", "params": [{}]},
                         ]
                     )
-                    requests.append((json.dumps(payload).encode(), "application/json"))
+                    requests.append(
+                        (
+                            "/api/v1/query",
+                            json.dumps(payload).encode(),
+                            "application/json",
+                            "POST",
+                        )
+                    )
 
             def submit(index):
-                body, content_type = requests[index]
+                path, body, content_type, method = requests[index]
                 status = send(
-                    base_url, body, content_type, timeout=args.request_timeout
+                    base_url,
+                    body,
+                    content_type,
+                    timeout=args.request_timeout,
+                    path=path,
+                    method=method,
                 )
                 if status >= 500:
                     raise AssertionError(f"request {index} returned HTTP {status}")

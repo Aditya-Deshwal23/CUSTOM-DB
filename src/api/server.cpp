@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "internal.h"
+#include "metrics/metrics.h"
 
 namespace relational_db {
 
@@ -41,7 +42,84 @@ ApiServer::Impl::Impl(std::shared_ptr<BufferPoolManager> buffer_pool,
         }
     }
     RegisterRoutes();
+    StartMetricsSampler();
     recovering.store(false, std::memory_order_release);
+}
+
+ApiServer::Impl::~Impl() {
+    stop_sampler.store(true, std::memory_order_release);
+    history_changed.notify_all();
+    if (sampler_thread.joinable()) {
+        sampler_thread.join();
+    }
+}
+
+void ApiServer::Impl::StartMetricsSampler() {
+    sampler_thread = std::thread([this]() {
+        while (!stop_sampler.load(std::memory_order_acquire)) {
+            SampleMetrics();
+            std::unique_lock<std::mutex> lock(history_mutex);
+            history_changed.wait_for(lock, std::chrono::seconds(1), [this]() {
+                return stop_sampler.load(std::memory_order_acquire);
+            });
+        }
+    });
+}
+
+void ApiServer::Impl::SampleMetrics() {
+    const BufferPoolStats pool = bpm->SnapshotStats();
+    const DiskStats disk = disk_manager->Stats();
+    const MetricsRegistry& metrics = MetricsRegistry::Instance();
+    const ApiMiddleware& middleware = app.get_middleware<ApiMiddleware>();
+    ApiHistorySample sample;
+    sample.ts_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count());
+    size_t index = 0;
+    const auto add = [&sample, &index](uint64_t value) { sample.values[index++] = value; };
+    add(pool.hits);
+    add(pool.misses);
+    add(pool.evictions);
+    add(pool.dirty_write_backs);
+    add(disk.reads);
+    add(disk.writes);
+    add(disk.syncs);
+    add(disk.bytes);
+    add(metrics.rows_read.Value());
+    add(metrics.rows_written.Value());
+    add(metrics.ErrorCount());
+    add(middleware.requests.load(std::memory_order_relaxed));
+    add(middleware.queries.load(std::memory_order_relaxed));
+    add(middleware.active_requests.load(std::memory_order_relaxed));
+    add(metrics.active_statements.Value());
+    add(metrics.statement_waiters.Value());
+    add(metrics.index_scans.Value());
+    add(metrics.sequential_scans.Value());
+    add(metrics.rate_limited_requests.Value());
+    add(metrics.inspect_rate_limited_requests.Value());
+    add(metrics.busy_rejections.Value());
+    add(metrics.wal_bytes.Value());
+    add(metrics.wal_commits.Value());
+    add(metrics.checkpoints.Value());
+    add(metrics.recovery_records.Value());
+    for (const Histogram* histogram :
+         {&metrics.disk_read_us, &metrics.disk_write_us, &metrics.disk_sync_us}) {
+        const HistogramSnapshot snapshot = histogram->Snapshot();
+        add(snapshot.count);
+        add(snapshot.sum);
+    }
+    for (const Histogram& histogram : metrics.statement_duration_us) {
+        const HistogramSnapshot snapshot = histogram.Snapshot();
+        add(snapshot.count);
+        add(snapshot.sum);
+    }
+    {
+        std::lock_guard<std::mutex> lock(history_mutex);
+        history.push_back(std::move(sample));
+        while (history.size() > 3600U) {
+            history.pop_front();
+        }
+    }
 }
 
 ApiServer::ApiServer(std::shared_ptr<BufferPoolManager> bpm,

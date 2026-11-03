@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -42,6 +43,35 @@ struct WalRecoveryStats {
     uint64_t elapsed_us{0};
 };
 
+struct WalCommitInfo {
+    uint64_t lsn{0};
+    uint64_t pages_written{0};
+    uint64_t bytes{0};
+    uint64_t fsync_us{0};
+};
+
+struct WalCommitResult {
+    std::vector<uint64_t> page_lsns;
+    WalCommitInfo info;
+};
+
+struct WalInspectionRecord {
+    uint64_t lsn{0};
+    uint64_t txn_id{0};
+    page_id_t page_id{INVALID_PAGE_ID};
+    uint64_t payload_bytes{0};
+    uint64_t file_offset{0};
+    LogRecordType type{LogRecordType::CHECKPOINT};
+    bool crc_ok{false};
+};
+
+struct WalInspectionSnapshot {
+    uint64_t base_lsn{0};
+    uint64_t size_bytes{0};
+    bool truncated{false};
+    std::vector<WalInspectionRecord> records;
+};
+
 class TxnContext {
    public:
     TxnContext(BufferPoolManager& buffer_pool, WriteAheadLog& wal, uint64_t txn_id,
@@ -52,6 +82,7 @@ class TxnContext {
 
     void Commit();
     void Rollback() noexcept;
+    std::optional<WalCommitInfo> CommitInfo() const;
     uint64_t Id() const noexcept {
         return txn_id_;
     }
@@ -66,6 +97,7 @@ class TxnContext {
     uint64_t txn_id_;
     uint64_t page_count_before_;
     bool completed_{false};
+    std::optional<WalCommitInfo> commit_info_;
     mutable RankedMutex state_mutex_{LockRank::FRAME_LATCH};
     std::unordered_map<page_id_t, PageBeforeImage> before_images_;
     std::unordered_map<page_id_t, bool> free_page_state_before_;
@@ -92,9 +124,8 @@ class WriteAheadLog {
 
     WalRecoveryStats Recover(IDiskManager& disk_manager);
     void Checkpoint(BufferPoolManager& buffer_pool);
-    uint64_t GetNextLSN() const noexcept {
-        return next_lsn_;
-    }
+    uint64_t GetNextLSN() const;
+    uint64_t LastLSN() const;
     uint64_t GetNextTxnId() const noexcept {
         return next_txn_id_;
     }
@@ -107,6 +138,8 @@ class WriteAheadLog {
     uint64_t CheckpointCount() const;
     uint64_t LastCheckpointUnixMs() const;
     WalRecoveryStats LastRecoveryStats() const;
+    WalInspectionSnapshot InspectRecords(size_t limit,
+                                         std::optional<uint64_t> before_lsn = std::nullopt) const;
     DurabilityMode Mode() const noexcept {
         return mode_;
     }
@@ -117,7 +150,7 @@ class WriteAheadLog {
     friend class BufferPoolManager;
     friend class TxnContext;
 
-    std::vector<uint64_t> Commit(uint64_t txn_id, const std::vector<CommitPage>& pages);
+    WalCommitResult Commit(uint64_t txn_id, const std::vector<CommitPage>& pages);
     void Sync();
     void RewriteHeader(uint64_t base_lsn);
     void EnsureRecovered() const;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <string>
 
@@ -40,6 +41,8 @@ class TransactionAwareWriteBackPolicy final : public WriteBackPolicy {
 
 namespace {
 
+thread_local PageTouchScope* active_page_touch_scope = nullptr;
+
 size_t ValidatePoolSize(size_t pool_size) {
     if (pool_size == 0 || pool_size > static_cast<size_t>(std::numeric_limits<frame_id_t>::max())) {
         throw DbError(ErrorCode::INVALID_ARGUMENT, "Buffer-pool frame count is out of range");
@@ -48,6 +51,26 @@ size_t ValidatePoolSize(size_t pool_size) {
 }
 
 }  // namespace
+
+PageTouchScope::PageTouchScope() : previous_(active_page_touch_scope) {
+    active_page_touch_scope = this;
+}
+
+PageTouchScope::~PageTouchScope() {
+    active_page_touch_scope = previous_;
+}
+
+void PageTouchScope::RecordHit() noexcept {
+    if (active_page_touch_scope != nullptr) {
+        ++active_page_touch_scope->counts_.hit;
+    }
+}
+
+void PageTouchScope::RecordMiss() noexcept {
+    if (active_page_touch_scope != nullptr) {
+        ++active_page_touch_scope->counts_.miss;
+    }
+}
 
 BufferPoolManager::BufferPoolManager(std::shared_ptr<IDiskManager> disk_manager)
     : BufferPoolManager(4096, std::move(disk_manager), "lruk") {}
@@ -227,13 +250,18 @@ void BufferPoolManager::CommitTransaction(TxnContext& transaction) {
         stamped_frames.emplace_back(frame, 0);
     }
 
-    const std::vector<uint64_t> lsns = pages.empty()
-                                           ? std::vector<uint64_t>{}
-                                           : transaction.wal_->Commit(transaction.txn_id_, pages);
+    WalCommitResult commit_result;
+    if (!pages.empty()) {
+        commit_result = transaction.wal_->Commit(transaction.txn_id_, pages);
+    }
     for (size_t index = 0; index < stamped_frames.size(); ++index) {
         std::unique_lock<RankedSharedMutex> page_lock(stamped_frames[index].first->rwlatch);
-        stamped_frames[index].first->lsn = lsns[index];
+        stamped_frames[index].first->lsn = commit_result.page_lsns[index];
         stamped_frames[index].first->dirty.store(true, std::memory_order_release);
+    }
+    if (!pages.empty()) {
+        std::lock_guard<RankedMutex> transaction_lock(transaction.state_mutex_);
+        transaction.commit_info_ = commit_result.info;
     }
     {
         std::lock_guard<RankedMutex> lock(pool_mutex_);
@@ -362,6 +390,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
                 replacer_->Pin(frame_id);
                 RegisterPinLocked(std::this_thread::get_id());
                 hits_.fetch_add(1, std::memory_order_relaxed);
+                PageTouchScope::RecordHit();
                 lock.unlock();
                 if (mode == GuardMode::READ) {
                     frame->rwlatch.lock_shared();
@@ -375,6 +404,7 @@ PageGuard BufferPoolManager::Fetch(page_id_t page_id, GuardMode mode, bool allow
 
             if (!recorded_miss) {
                 misses_.fetch_add(1, std::memory_order_relaxed);
+                PageTouchScope::RecordMiss();
                 recorded_miss = true;
             }
             const bool took_free_frame = !free_list_.empty();
@@ -802,6 +832,24 @@ void BufferPoolManager::VerifyDiskPages() const {
     }
 }
 
+void BufferPoolManager::ReadPageWithoutReplacement(page_id_t page_id, char* page_data,
+                                                   PageType& type, uint16_t& flags, uint64_t& lsn) {
+    {
+        std::lock_guard<RankedMutex> pool_lock(pool_mutex_);
+        const auto mapped = page_table_.find(page_id);
+        if (mapped != page_table_.end()) {
+            Frame& frame = frames_[static_cast<size_t>(mapped->second)];
+            std::shared_lock<RankedSharedMutex> frame_lock(frame.rwlatch);
+            std::memcpy(page_data, frame.data.data(), frame.data.size());
+            type = frame.page_type;
+            flags = frame.page_flags;
+            lsn = frame.lsn;
+            return;
+        }
+    }
+    disk_manager_->ReadPage(page_id, page_data, type, flags, lsn);
+}
+
 BufferPoolStats BufferPoolManager::SnapshotStats() const {
     BufferPoolStats stats{};
     stats.hits = hits_.load(std::memory_order_relaxed);
@@ -820,7 +868,7 @@ std::vector<FrameInfo> BufferPoolManager::Snapshot() const {
     const size_t hand = replacer_->ClockHand();
     for (size_t index = 0; index < count; ++index) {
         const Frame& frame = frames_[index];
-        snapshot.push_back(FrameInfo{static_cast<frame_id_t>(index), frame.page_id,
+        snapshot.push_back(FrameInfo{static_cast<frame_id_t>(index), frame.page_id, frame.page_type,
                                      frame.pin_count.load(std::memory_order_relaxed),
                                      frame.dirty.load(std::memory_order_relaxed),
                                      replacer_->ReferenceBit(static_cast<frame_id_t>(index)),

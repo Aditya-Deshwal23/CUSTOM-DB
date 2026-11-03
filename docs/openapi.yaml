@@ -168,6 +168,102 @@ paths:
                           type: boolean
         "404":
           $ref: "#/components/responses/ApiError"
+  /api/v1/tables/{name}/rows:
+    get:
+      operationId: inspectTableRows
+      description: Returns at most 500 typed rows using replacement-neutral reads, a 100000-row examination cap, INSPECT_MAX_PAGES, and STATEMENT_TIMEOUT_MS. Cursor order is the requested column followed by RID; inspector rate-limit class and API_KEY authentication policy apply.
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+            maxLength: 256
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - in: query
+          name: after
+          required: false
+          description: Opaque cursor returned by the prior page; it is bound to the table, ordering column, and direction.
+          schema:
+            type: string
+            maxLength: 9000
+        - in: query
+          name: order
+          required: false
+          description: Column name, optionally suffixed with :desc. Defaults to the primary key or first column.
+          schema:
+            type: string
+            maxLength: 256
+        - in: query
+          name: filter
+          required: false
+          description: JSON object or array of up to 16 structured predicates. Operators are =, <>, <, <=, >, >=, LIKE, and ISNULL; values are validated against the column type.
+          schema:
+            type: string
+            maxLength: 8192
+          examples:
+            activeCustomers:
+              value: '{"column":"active","op":"=","value":true}'
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "200":
+          description: Bounded page of typed table rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [columns, rows, row_count, next_cursor]
+                properties:
+                  columns:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Column"
+                  rows:
+                    type: array
+                    maxItems: 500
+                    items:
+                      type: object
+                      required: [rid, values]
+                      properties:
+                        rid:
+                          type: string
+                          pattern: "^[0-9]+:[0-9]+$"
+                        values:
+                          type: object
+                          additionalProperties:
+                            type: [string, integer, number, boolean, "null"]
+                  row_count:
+                    type: integer
+                    maximum: 500
+                  next_cursor:
+                    type: [string, "null"]
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "413":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
+        "503":
+          $ref: "#/components/responses/ApiError"
   /api/v1/stats:
     get:
       operationId: getStats
@@ -187,12 +283,530 @@ paths:
                     type: object
                   statement_duration_us:
                     type: object
+  /api/v1/snapshot:
+    get:
+      operationId: getSnapshot
+      description: Combined bounded live snapshot with an ETag validator. Inspector routes use the separate inspect rate-limit bucket; X-API-Key is required when API_KEY is configured.
+      parameters:
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+            maxLength: 256
+      responses:
+        "200":
+          description: Combined engine, runtime, storage, pool, WAL, and activity snapshot.
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ts_ms, engine, stats, storage, pool, wal, activity]
+                properties:
+                  ts_ms:
+                    type: integer
+                  engine:
+                    type: object
+                  stats:
+                    type: object
+                  storage:
+                    type: object
+                  pool:
+                    type: object
+                  wal:
+                    type: object
+                  activity:
+                    type: object
+        "304":
+          description: Snapshot representation has not changed.
+          headers:
+            ETag:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/catalog:
+    get:
+      operationId: getCatalog
+      description: Returns all tables and their bounded storage metadata in one read-only request. Inspector routes use the separate inspect rate-limit bucket; X-API-Key is required when API_KEY is configured.
+      parameters:
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "200":
+          description: Full catalog within the 8 MiB response limit.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tables]
+                properties:
+                  tables:
+                    type: array
+                    items:
+                      type: object
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "413":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/stats/history:
+    get:
+      operationId: getMetricsHistory
+      description: Server-side one-sample-per-second ring; output is columnar and bounded to 3600 samples.
+      parameters:
+        - in: query
+          name: window_s
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 3600
+            default: 900
+        - in: query
+          name: step_s
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 60
+            default: 1
+      responses:
+        "200":
+          description: Columnar timestamp and metric series.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ts_ms, series, step_s]
+                properties:
+                  ts_ms:
+                    type: array
+                    maxItems: 3600
+                    items:
+                      type: integer
+                  series:
+                    type: object
+                  step_s:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/slow-queries:
+    get:
+      operationId: getSlowQueries
+      description: Returns up to 100 sampled slow-query previews. Parameter values are never included.
+      responses:
+        "200":
+          description: Bounded slow-query ring buffer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queries]
+                properties:
+                  queries:
+                    type: array
+                    maxItems: 100
+                    items:
+                      type: object
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/inspect/pages:
+    get:
+      operationId: getPageTypeMap
+      description: Returns a one-byte-per-page page-type map without loading pages into or perturbing buffer-pool replacement state.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 2147483647
+            default: 0
+        - in: query
+          name: count
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4096
+            default: 256
+      responses:
+        "200":
+          description: Compact base64 page-type map.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, count, total, page_types_base64, corrupt_pages]
+                properties:
+                  from:
+                    type: integer
+                  count:
+                    type: integer
+                    maximum: 4096
+                  total:
+                    type: integer
+                  page_types_base64:
+                    type: string
+                  corrupt_pages:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/inspect/pages/{page_id}:
+    get:
+      operationId: inspectPage
+      description: Defensive page decoder. Raw page bytes require INSPECT_RAW_BYTES=1 and raw=1.
+      parameters:
+        - in: path
+          name: page_id
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 2147483647
+        - in: query
+          name: raw
+          required: false
+          schema:
+            type: integer
+            enum: [0, 1]
+            default: 0
+      responses:
+        "200":
+          description: Decoded page, checksum result, and bounded byte regions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [page_id, type, crc_ok, lsn, decoded, regions]
+                properties:
+                  page_id:
+                    type: integer
+                  type:
+                    type: string
+                  crc_ok:
+                    type: boolean
+                  lsn:
+                    type: integer
+                  decoded:
+                    type: object
+                    description: B+ tree keys include key_base64 and a typed key when the owning index schema is resolvable.
+                  regions:
+                    type: array
+                  hex_base64:
+                    type: string
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/inspect/wal:
+    get:
+      operationId: inspectWal
+      description: Returns a bounded tail of validated WAL records. Inspector rate-limit class; X-API-Key is required when API_KEY is configured.
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - in: query
+          name: before_lsn
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "200":
+          description: Validated WAL record tail and commit boundaries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [records, commit_lsns, size_bytes, base_lsn, truncated]
+                properties:
+                  records:
+                    type: array
+                    maxItems: 500
+                    items:
+                      type: object
+                      required: [lsn, type, txn_id, page_id, payload_bytes, crc_ok, file_offset]
+                      properties:
+                        lsn:
+                          type: integer
+                        type:
+                          type: string
+                          enum: [PAGE_IMAGE, COMMIT, CHECKPOINT]
+                        txn_id:
+                          type: integer
+                        page_id:
+                          type: [integer, "null"]
+                        payload_bytes:
+                          type: integer
+                        crc_ok:
+                          type: boolean
+                        file_offset:
+                          type: integer
+                  commit_lsns:
+                    type: array
+                    items:
+                      type: integer
+                  size_bytes:
+                    type: integer
+                  base_lsn:
+                    type: integer
+                  truncated:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
+        "503":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/inspect/indexes/{name}/tree:
+    get:
+      operationId: inspectIndexTree
+      description: Returns a bounded tree walk from the real B+ tree pages using replacement-neutral reads. Inspector rate-limit class; X-API-Key is required when API_KEY is configured.
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+            maxLength: 256
+        - in: query
+          name: max_nodes
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 200
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "200":
+          description: Bounded B+ tree node listing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes, truncated]
+                properties:
+                  nodes:
+                    type: array
+                    maxItems: 200
+                    items:
+                      type: object
+                      required: [page_id, level, count, min_key, max_key, children, next, fill_pct]
+                      properties:
+                        page_id:
+                          type: integer
+                        level:
+                          type: integer
+                        count:
+                          type: integer
+                        min_key:
+                          description: Typed SQL key; VARCHAR keys expose their stored hash as hash_base64.
+                          type: [integer, number, boolean, string, object, "null"]
+                        max_key:
+                          description: Typed SQL key; VARCHAR keys expose their stored hash as hash_base64.
+                          type: [integer, number, boolean, string, object, "null"]
+                        children:
+                          type: array
+                          items:
+                            type: integer
+                        next:
+                          type: [integer, "null"]
+                        fill_pct:
+                          type: number
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/inspect/indexes/{name}/trace:
+    get:
+      operationId: traceIndexLookup
+      description: Runs the B+ tree's actual key-selection and leaf-search logic with a TraceSink and replacement-neutral reads. Inspector rate-limit class; X-API-Key is required when API_KEY is configured.
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+            maxLength: 256
+        - in: query
+          name: key
+          required: true
+          schema:
+            type: string
+            maxLength: 1024
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "200":
+          description: Exact page decisions and matching record identifier if found.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [path, found, rid]
+                properties:
+                  path:
+                    type: array
+                    maxItems: 16
+                    items:
+                      type: object
+                      required: [page_id, level, slot, decision]
+                      properties:
+                        page_id:
+                          type: integer
+                        level:
+                          type: integer
+                        slot:
+                          type: integer
+                        decision:
+                          type: string
+                  found:
+                    type: boolean
+                  rid:
+                    type: [string, "null"]
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/inspect/freelist:
+    get:
+      operationId: inspectFreeList
+      description: Walks and validates the bounded free-page chain without changing buffer-pool replacement state. Inspector rate-limit class; X-API-Key is required when API_KEY is configured.
+      parameters:
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "200":
+          description: Free page IDs; truncated is true if the configured inspection cap was reached.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pages, truncated]
+                properties:
+                  pages:
+                    type: array
+                    maxItems: 4096
+                    items:
+                      type: integer
+                      minimum: 0
+                  truncated:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
   /api/v1/stats/buffer_pool:
     get:
       operationId: getBufferPoolSnapshot
+      parameters:
+        - in: query
+          name: format
+          required: false
+          description: Use legacy to request the deprecated per-frame object array. Default is compact base64 state bytes.
+          schema:
+            type: string
+            enum: [compact, legacy]
+            default: compact
       responses:
         "200":
-          description: Live per-frame buffer-pool snapshot and pin state.
+          description: Compact per-frame buffer-pool states; format=legacy retains the previous object array.
           content:
             application/json:
               schema:
@@ -202,6 +816,11 @@ paths:
                     type: integer
                   snapshot_size:
                     type: integer
+                  encoding:
+                    type: string
+                    const: base64-state-v1
+                  states_base64:
+                    type: string
                   frames:
                     type: array
                     items:
@@ -424,6 +1043,7 @@ components:
         - rows_affected
         - truncated
         - elapsed_us
+        - pages_touched
       properties:
         ok:
           const: true
@@ -450,6 +1070,32 @@ components:
         elapsed_us:
           type: integer
           minimum: 0
+        pages_touched:
+          type: object
+          required: [hit, miss]
+          properties:
+            hit:
+              type: integer
+              minimum: 0
+            miss:
+              type: integer
+              minimum: 0
+        commit:
+          type: object
+          required: [lsn, pages_written, bytes, fsync_us]
+          properties:
+            lsn:
+              type: integer
+              minimum: 0
+            pages_written:
+              type: integer
+              minimum: 0
+            bytes:
+              type: integer
+              minimum: 0
+            fsync_us:
+              type: integer
+              minimum: 0
         plan:
           type: string
         deprecated:

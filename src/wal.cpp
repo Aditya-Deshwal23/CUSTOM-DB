@@ -290,6 +290,11 @@ void TxnContext::Commit() {
     }
 }
 
+std::optional<WalCommitInfo> TxnContext::CommitInfo() const {
+    std::lock_guard<RankedMutex> lock(state_mutex_);
+    return commit_info_;
+}
+
 void TxnContext::Rollback() noexcept {
     if (completed_) {
         return;
@@ -442,6 +447,16 @@ uint64_t WriteAheadLog::SizeBytes() const {
     return file_size_;
 }
 
+uint64_t WriteAheadLog::GetNextLSN() const {
+    std::lock_guard<RankedMutex> lock(latch_);
+    return next_lsn_;
+}
+
+uint64_t WriteAheadLog::LastLSN() const {
+    std::lock_guard<RankedMutex> lock(latch_);
+    return next_lsn_ == 0U ? 0U : next_lsn_ - 1U;
+}
+
 uint64_t WriteAheadLog::CommitCount() const {
     std::lock_guard<RankedMutex> lock(latch_);
     return commit_count_;
@@ -460,6 +475,94 @@ uint64_t WriteAheadLog::LastCheckpointUnixMs() const {
 WalRecoveryStats WriteAheadLog::LastRecoveryStats() const {
     std::lock_guard<RankedMutex> lock(latch_);
     return recovery_stats_;
+}
+
+WalInspectionSnapshot WriteAheadLog::InspectRecords(size_t limit,
+                                                    std::optional<uint64_t> before_lsn) const {
+    constexpr uint64_t kMaxInspectionBytes = 64U * 1024U * 1024U;
+    constexpr size_t kMaxInspectionRecords = 500U;
+    if (limit == 0U || limit > kMaxInspectionRecords) {
+        throw DbError(ErrorCode::INVALID_ARGUMENT, "WAL inspection limit must be 1..500");
+    }
+
+    std::lock_guard<RankedMutex> lock(latch_);
+    WalInspectionSnapshot snapshot;
+    snapshot.size_bytes = file_size_;
+    if (file_size_ < kWalHeaderSize) {
+        snapshot.truncated = true;
+        return snapshot;
+    }
+    std::array<uint8_t, kWalHeaderSize> header{};
+    if (!ReadFullyAt(file_descriptor_, 0, header.data(), header.size())) {
+        throw DbError(ErrorCode::IO_ERROR, "Unable to read WAL header for inspection");
+    }
+    if (!std::equal(kWalMagic.begin(), kWalMagic.end(), header.begin()) ||
+        GetU32(header.data() + 8) != kWalVersion ||
+        GetU32(header.data() + 20) != Crc32c(header.data(), 20)) {
+        snapshot.truncated = true;
+        return snapshot;
+    }
+    snapshot.base_lsn = GetU64(header.data() + 12);
+    uint64_t offset = kWalHeaderSize;
+    const uint64_t scan_end = std::min(file_size_, kWalHeaderSize + kMaxInspectionBytes);
+    while (offset + sizeof(uint32_t) <= scan_end) {
+        std::array<uint8_t, 4> size_bytes{};
+        if (!ReadFullyAt(file_descriptor_, offset, size_bytes.data(), size_bytes.size())) {
+            snapshot.truncated = true;
+            break;
+        }
+        const uint32_t length = GetU32(size_bytes.data());
+        if (length < kRecordFixedSize || length > PAGE_SIZE + kRecordFixedSize + sizeof(uint32_t) ||
+            offset + length > scan_end) {
+            snapshot.truncated = true;
+            break;
+        }
+        std::vector<uint8_t> record(length);
+        if (!ReadFullyAt(file_descriptor_, offset, record.data(), record.size())) {
+            snapshot.truncated = true;
+            break;
+        }
+        const uint32_t stored_crc = GetU32(record.data() + length - sizeof(uint32_t));
+        const bool crc_ok = stored_crc == Crc32c(record.data(), length - sizeof(uint32_t));
+        const uint8_t type_value = record[4];
+        if (type_value < static_cast<uint8_t>(LogRecordType::PAGE_IMAGE) ||
+            type_value > static_cast<uint8_t>(LogRecordType::CHECKPOINT)) {
+            snapshot.truncated = true;
+            break;
+        }
+        const LogRecordType type = static_cast<LogRecordType>(type_value);
+        const uint64_t lsn = GetU64(record.data() + 13);
+        const size_t payload_bytes = length - kRecordFixedSize;
+        if ((type == LogRecordType::PAGE_IMAGE && payload_bytes != sizeof(uint32_t) + PAGE_SIZE) ||
+            (type != LogRecordType::PAGE_IMAGE && payload_bytes != 0U)) {
+            snapshot.truncated = true;
+            break;
+        }
+        if (!before_lsn || lsn < *before_lsn) {
+            snapshot.records.push_back(
+                WalInspectionRecord{lsn, GetU64(record.data() + 5),
+                                    type == LogRecordType::PAGE_IMAGE
+                                        ? static_cast<page_id_t>(GetU32(record.data() + 21))
+                                        : INVALID_PAGE_ID,
+                                    static_cast<uint64_t>(payload_bytes), offset, type, crc_ok});
+            if (snapshot.records.size() > kMaxInspectionRecords) {
+                snapshot.records.erase(snapshot.records.begin());
+            }
+        }
+        offset += length;
+        if (!crc_ok) {
+            snapshot.truncated = true;
+            break;
+        }
+    }
+    if (scan_end < file_size_) {
+        snapshot.truncated = true;
+    }
+    if (snapshot.records.size() > limit) {
+        snapshot.records.erase(snapshot.records.begin(),
+                               snapshot.records.end() - static_cast<std::ptrdiff_t>(limit));
+    }
+    return snapshot;
 }
 
 uint64_t WriteAheadLog::GetFirstUnsyncedLSN() const {
@@ -490,7 +593,7 @@ void WriteAheadLog::EnsureDurable(uint64_t page_lsn) {
     }
 }
 
-std::vector<uint64_t> WriteAheadLog::Commit(uint64_t txn_id, const std::vector<CommitPage>& pages) {
+WalCommitResult WriteAheadLog::Commit(uint64_t txn_id, const std::vector<CommitPage>& pages) {
     std::lock_guard<RankedMutex> lock(latch_);
     EnsureRecovered();
     ThrowSyncError();
@@ -539,6 +642,7 @@ std::vector<uint64_t> WriteAheadLog::Commit(uint64_t txn_id, const std::vector<C
     next_txn_id_ = std::max(next_txn_id_, txn_id + 1U);
     FailPoint::Hit("commit_after");
 
+    const auto sync_started = std::chrono::steady_clock::now();
     try {
         Sync();
     } catch (const std::exception& error) {
@@ -549,7 +653,14 @@ std::vector<uint64_t> WriteAheadLog::Commit(uint64_t txn_id, const std::vector<C
     MetricsRegistry::Instance().wal_commits.Increment();
     ++commit_count_;
     FailPoint::Hit("wal_fsync_after");
-    return page_lsns;
+    WalCommitResult result;
+    result.page_lsns = std::move(page_lsns);
+    result.info = WalCommitInfo{
+        next_lsn_ - 1U, static_cast<uint64_t>(pages.size()), static_cast<uint64_t>(batch.size()),
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - sync_started)
+                                  .count())};
+    return result;
 }
 
 void WriteAheadLog::Sync() {

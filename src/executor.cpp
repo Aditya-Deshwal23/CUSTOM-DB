@@ -253,12 +253,90 @@ std::vector<SqlExecutionResult> Executor::ExecuteBatch(
     }
 }
 
-std::vector<SqlTableMetadata> Executor::GetTables() {
-    return sql_engine_->GetTables();
+std::vector<SqlTableMetadata> Executor::GetTables(uint64_t max_pages) {
+    return sql_engine_->GetTables(max_pages);
 }
 
 std::optional<SqlTableMetadata> Executor::GetTable(std::string_view name) {
     return sql_engine_->GetTable(name);
+}
+
+std::vector<InspectedPage> Executor::InspectPages(page_id_t from, uint64_t count) {
+    if (from < 0 || count > 4096U) {
+        throw DbError(ErrorCode::INVALID_ARGUMENT, "Invalid page inspection range");
+    }
+    StatementScope scope(statement_gate_, false);
+    std::vector<InspectedPage> pages;
+    pages.reserve(static_cast<size_t>(count));
+    const uint64_t page_count = bpm_->PageCount();
+    for (uint64_t offset = 0; offset < count; ++offset) {
+        const uint64_t current = static_cast<uint64_t>(from) + offset;
+        InspectedPage page;
+        if (current > static_cast<uint64_t>(std::numeric_limits<page_id_t>::max())) {
+            page.page_id = INVALID_PAGE_ID;
+            page.read_error = "Page ID exceeds the supported range";
+            pages.push_back(std::move(page));
+            continue;
+        }
+        page.page_id = static_cast<page_id_t>(current);
+        if (current >= page_count) {
+            page.read_error = "Page ID is outside the database file";
+            pages.push_back(std::move(page));
+            continue;
+        }
+        try {
+            bpm_->ReadPageWithoutReplacement(page.page_id, page.body.data(), page.type, page.flags,
+                                             page.lsn);
+            page.crc_ok = true;
+        } catch (const DbError& error) {
+            page.read_error = error.what();
+            page.crc_ok = error.Code() != ErrorCode::PAGE_CHECKSUM_MISMATCH &&
+                          error.Code() != ErrorCode::HEADER_CORRUPT;
+        }
+        pages.push_back(std::move(page));
+    }
+    bpm_->AssertNoPinsHeld();
+    return pages;
+}
+
+SqlIndexTreeInspection Executor::InspectIndexTree(std::string_view name, uint64_t max_nodes) {
+    return sql_engine_->InspectIndexTree(name, max_nodes);
+}
+
+std::pair<SqlIndexTree::LookupTraceResult, std::vector<SqlIndexTree::TraceDecision>>
+Executor::TraceIndex(std::string_view name, std::string_view key) {
+    return sql_engine_->TraceIndex(name, key);
+}
+
+SqlInspectedRows Executor::InspectRows(std::string_view table, uint64_t limit,
+                                       std::string_view after, size_t order_column, bool descending,
+                                       const std::vector<SqlInspectFilter>& filters,
+                                       uint64_t max_pages, std::chrono::milliseconds timeout) {
+    return sql_engine_->InspectRows(table, limit, after, order_column, descending, filters,
+                                    max_pages, timeout);
+}
+
+std::optional<SqlHeapPageInspection> Executor::InspectHeapPage(page_id_t page_id,
+                                                               uint64_t max_pages) {
+    return sql_engine_->InspectHeapPage(page_id, max_pages);
+}
+
+std::optional<SqlIndexPageOwner> Executor::FindIndexPageOwner(page_id_t page_id,
+                                                              uint64_t max_pages) {
+    return sql_engine_->FindIndexPageOwner(page_id, max_pages);
+}
+
+std::unique_ptr<StatementScope> Executor::AcquireInspectionGate() {
+    return std::make_unique<StatementScope>(statement_gate_, false);
+}
+
+WalInspectionSnapshot Executor::InspectWalRecords(size_t limit,
+                                                  std::optional<uint64_t> before_lsn) {
+    StatementScope scope(statement_gate_, false);
+    if (wal_ == nullptr) {
+        throw DbError(ErrorCode::INVALID_ARGUMENT, "WAL inspection is unavailable");
+    }
+    return wal_->InspectRecords(limit, before_lsn);
 }
 
 std::string Executor::ExecuteLegacyQuery(const std::string& query) {
