@@ -418,6 +418,7 @@ jobs:
         with:
           target: http://127.0.0.1:18082
           rules_file_name: .zap/rules.tsv
+          artifact_name: zap-baseline-scan
           fail_action: true
           allow_issue_writing: false
       - name: Preserve ZAP baseline report
@@ -432,6 +433,7 @@ jobs:
           format: openapi
           rules_file_name: .zap/rules.tsv
           cmd_options: -O http://127.0.0.1:18082
+          artifact_name: zap-openapi-scan
           fail_action: true
           allow_issue_writing: false
       - name: Preserve ZAP API report
