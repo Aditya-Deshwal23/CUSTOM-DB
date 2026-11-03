@@ -225,6 +225,7 @@ paths:
           schema:
             type: string
             maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
       responses:
         "200":
           description: Bounded page of typed table rows.
@@ -304,12 +305,14 @@ paths:
           schema:
             type: string
             maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
         - in: header
           name: If-None-Match
           required: false
           schema:
             type: string
             maxLength: 256
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,256}$'
       responses:
         "200":
           description: Combined engine, runtime, storage, pool, WAL, and activity snapshot.
@@ -361,6 +364,7 @@ paths:
           schema:
             type: string
             maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
       responses:
         "200":
           description: Full catalog within the 8 MiB response limit.
@@ -581,6 +585,7 @@ paths:
           schema:
             type: string
             maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
       responses:
         "200":
           description: Validated WAL record tail and commit boundaries.
@@ -661,6 +666,7 @@ paths:
           schema:
             type: string
             maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
       responses:
         "200":
           description: Bounded B+ tree node listing.
@@ -732,6 +738,7 @@ paths:
           schema:
             type: string
             maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
       responses:
         "200":
           description: Exact page decisions and matching record identifier if found.
@@ -782,6 +789,7 @@ paths:
           schema:
             type: string
             maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
       responses:
         "200":
           description: Free page IDs; truncated is true if the configured inspection cap was reached.
@@ -900,6 +908,15 @@ paths:
   /api/v1/admin/checkpoint:
     post:
       operationId: checkpoint
+      parameters:
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured; valid HTTP field value, at most 4096 bytes.
+          schema:
+            type: string
+            maxLength: 4096
+            pattern: '^[\x20-\x7E\x80-\xFF]{0,4096}$'
       security:
         - ApiKey: []
       responses:

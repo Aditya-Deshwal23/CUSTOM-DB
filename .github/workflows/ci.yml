@@ -401,7 +401,6 @@ jobs:
           python3 -m pip install --require-hashes -r tests/api/requirements.txt
           schemathesis run docs/openapi.yaml \
             --base-url http://127.0.0.1:18082 \
-            --header 'Connection: close' \
             --experimental=openapi-3.1 \
             --rate-limit 4/s \
             --checks all \
@@ -439,10 +438,16 @@ jobs:
           path: |
             report_html.html
             report_json.json
-            schemathesis-debug.jsonl
             zap-baseline.json
             zap-api.json
           if-no-files-found: ignore
+      - name: Upload Schemathesis debug trace after failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: schemathesis-debug
+          path: schemathesis-debug.jsonl
+          if-no-files-found: warn
       - name: Stop isolated test service
         if: always()
         run: docker stop custom-db-security || true
