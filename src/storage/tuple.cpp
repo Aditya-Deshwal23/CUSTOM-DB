@@ -63,7 +63,9 @@ UInt ReadLittleEndian(const Tuple& bytes, size_t offset) {
     }
     UInt value = 0;
     for (size_t byte = 0; byte < sizeof(UInt); ++byte) {
-        value |= static_cast<UInt>(std::to_integer<uint8_t>(bytes[offset + byte])) << (byte * 8U);
+        const UInt part = static_cast<UInt>(
+            static_cast<UInt>(std::to_integer<uint8_t>(bytes[offset + byte])) << (byte * 8U));
+        value = static_cast<UInt>(value | part);
     }
     return value;
 }

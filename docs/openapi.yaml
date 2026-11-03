@@ -127,6 +127,8 @@ paths:
                     type: array
                     items:
                       type: string
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/v1/tables/{name}:
     get:
       operationId: getTable
@@ -136,6 +138,8 @@ paths:
           required: true
           schema:
             type: string
+            maxLength: 256
+            pattern: '^[A-Za-z_][A-Za-z0-9_$]{0,255}$'
       responses:
         "200":
           description: Table schema and observed row count.
@@ -168,6 +172,8 @@ paths:
                           type: boolean
         "404":
           $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/v1/tables/{name}/rows:
     get:
       operationId: inspectTableRows
@@ -179,6 +185,7 @@ paths:
           schema:
             type: string
             maxLength: 256
+            pattern: '^[A-Za-z_][A-Za-z0-9_$]{0,255}$'
         - in: query
           name: limit
           required: false
@@ -283,6 +290,8 @@ paths:
                     type: object
                   statement_duration_us:
                     type: object
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/v1/snapshot:
     get:
       operationId: getSnapshot
@@ -483,6 +492,8 @@ paths:
                     type: integer
         "400":
           $ref: "#/components/responses/ApiError"
+        "422":
+          $ref: "#/components/responses/ApiError"
         "401":
           $ref: "#/components/responses/ApiError"
         "404":
@@ -533,6 +544,8 @@ paths:
                   hex_base64:
                     type: string
         "400":
+          $ref: "#/components/responses/ApiError"
+        "422":
           $ref: "#/components/responses/ApiError"
         "401":
           $ref: "#/components/responses/ApiError"
@@ -632,6 +645,7 @@ paths:
           schema:
             type: string
             maxLength: 256
+            pattern: '^[A-Za-z_][A-Za-z0-9_$]{0,255}$'
         - in: query
           name: max_nodes
           required: false
@@ -704,6 +718,7 @@ paths:
           schema:
             type: string
             maxLength: 256
+            pattern: '^[A-Za-z_][A-Za-z0-9_$]{0,255}$'
         - in: query
           name: key
           required: true
@@ -825,6 +840,8 @@ paths:
                     type: array
                     items:
                       type: object
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/v1/stats/storage:
     get:
       operationId: getStorageStats
@@ -846,6 +863,8 @@ paths:
                     type: integer
                   recovery:
                     type: object
+        "429":
+          $ref: "#/components/responses/ApiError"
   /metrics:
     get:
       operationId: prometheusMetrics
@@ -856,6 +875,8 @@ paths:
             text/plain:
               schema:
                 type: string
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/v1/version:
     get:
       operationId: getVersion
@@ -874,6 +895,8 @@ paths:
                     type: string
                   format_version:
                     type: integer
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/v1/admin/checkpoint:
     post:
       operationId: checkpoint
@@ -884,6 +907,8 @@ paths:
           description: Checkpoint completed.
         "401":
           $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "503":
           $ref: "#/components/responses/ApiError"
   /health:
@@ -892,12 +917,16 @@ paths:
       responses:
         "200":
           description: Deprecated liveness alias.
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/metrics:
     get:
       deprecated: true
       responses:
         "200":
           description: Deprecated JSON metrics alias.
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/query:
     post:
       deprecated: true
@@ -910,6 +939,10 @@ paths:
       responses:
         "200":
           description: Deprecated query response shape.
+        "400":
+          description: The legacy request body is invalid.
+        "429":
+          $ref: "#/components/responses/ApiError"
 components:
   securitySchemes:
     ApiKey:

@@ -201,13 +201,13 @@ struct RowInspectionCursor {
 
 std::vector<uint8_t> CursorValueBytes(const Value& value) {
     std::vector<uint8_t> bytes;
-    if (const auto* integer = std::get_if<int32_t>(&value)) {
-        const uint32_t bits = static_cast<uint32_t>(*integer);
+    if (const auto* integer32 = std::get_if<int32_t>(&value)) {
+        const uint32_t bits = static_cast<uint32_t>(*integer32);
         for (size_t byte = 0; byte < sizeof(bits); ++byte) {
             bytes.push_back(static_cast<uint8_t>(bits >> (byte * 8U)));
         }
-    } else if (const auto* integer = std::get_if<int64_t>(&value)) {
-        const uint64_t bits = static_cast<uint64_t>(*integer);
+    } else if (const auto* integer64 = std::get_if<int64_t>(&value)) {
+        const uint64_t bits = static_cast<uint64_t>(*integer64);
         for (size_t byte = 0; byte < sizeof(bits); ++byte) {
             bytes.push_back(static_cast<uint8_t>(bits >> (byte * 8U)));
         }

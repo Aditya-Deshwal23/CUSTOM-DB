@@ -1,6 +1,7 @@
 # CUSTOM-DB
 
 [![CI](https://github.com/Aditya-Deshwal23/CUSTOM-DB/actions/workflows/ci.yml/badge.svg)](https://github.com/Aditya-Deshwal23/CUSTOM-DB/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Aditya-Deshwal23/CUSTOM-DB/badge)](https://scorecard.dev/viewer/?uri=github.com/Aditya-Deshwal23/CUSTOM-DB)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Coverage report](https://img.shields.io/badge/coverage-gcovr%20in%20CI-blue)](https://github.com/Aditya-Deshwal23/CUSTOM-DB/actions/workflows/ci.yml)
 
@@ -10,16 +11,19 @@ CUSTOM-DB is a small C++17 relational storage engine presented as one self-conta
 
 Try the [live dashboard](https://custom-db-engine.onrender.com). It runs on Render's Free tier: its local filesystem is ephemeral and the service spins down when idle, so data may reset. Do not use the demo for persistent data. Persistent disks require a paid Render instance; see Render's [Free instance](https://render.com/docs/free) and [disk](https://render.com/docs/disks) documentation.
 
-## 60-second quickstart
+## Quickstart
 
-Requires Docker and `curl`. The published v1.0.0 image is multi-architecture and stores database files in the named volume:
+Requires Docker and `curl`. Building the image can take longer than the
+subsequent startup and API smoke test. Until a signed release image is
+published, build the container locally. The database is stored in the named volume:
 
 ```sh
+docker build -t custom-db:local .
 docker volume create custom-db-data
 docker run -d --name custom-db -p 8080:8080 \
   -e PORT=8080 -e DB_PATH=/data/custom.db \
   --mount source=custom-db-data,target=/data \
-  ghcr.io/aditya-deshwal23/custom-db:1.0.0
+  custom-db:local
 curl -fsS http://localhost:8080/readyz
 curl -fsS -X POST http://localhost:8080/api/v1/query \
   -H 'Content-Type: application/json' \
@@ -35,6 +39,15 @@ docker rm custom-db
 ```
 
 CI runs the same container workflow through [`scripts/quickstart.sh`](scripts/quickstart.sh) against the image it just built. For a local source build, use the [development instructions](RUN_INSTRUCTIONS.md).
+
+After a signed release is published, verify its signature before pulling it:
+
+```sh
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/Aditya-Deshwal23/CUSTOM-DB/.github/workflows/release\.yml@refs/tags/v.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/aditya-deshwal23/custom-db:X.Y.Z
+```
 
 ## What works today
 
@@ -105,7 +118,8 @@ Reproduce with [`tools/benchmark_sqlite.py`](tools/benchmark_sqlite.py); full me
 - [Architecture](docs/ARCHITECTURE.md), [SQL reference](docs/SQL_REFERENCE.md), [API contract](docs/openapi.yaml)
 - [Configuration](docs/CONFIG.md), [file format](docs/FILE_FORMAT.md), [WAL and recovery](docs/WAL_AND_RECOVERY.md), [concurrency](docs/CONCURRENCY.md)
 - [Benchmarks](docs/BENCHMARKS.md), [limitations](docs/LIMITATIONS.md), [claim ledger](docs/CLAIMS.md)
-- [Interview Q&A](docs/INTERVIEW_QA.md), [contributing](docs/CONTRIBUTING.md), [security](docs/SECURITY.md), [changelog](docs/CHANGELOG.md)
+- [Operations](docs/OPERATIONS.md), [threat model](docs/THREAT_MODEL.md), [release process](docs/RELEASING.md)
+- [Interview Q&A](docs/INTERVIEW_QA.md), [contributing](docs/CONTRIBUTING.md), [security policy](SECURITY.md), [Code of Conduct](CODE_OF_CONDUCT.md), [changelog](docs/CHANGELOG.md)
 - [v1.0.0 release notes](docs/releases/v1.0.0.md)
 - [Three-minute demo](docs/DEMO.md), [engineering post-mortem](DIFFICULTIES_FACED.md)
 

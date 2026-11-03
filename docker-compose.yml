@@ -5,6 +5,13 @@ services:
     image: custom-db:local
     init: true
     restart: unless-stopped
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 2048
     env_file:
       - .env.example
     ports:
@@ -13,7 +20,7 @@ services:
       - custom-db-data:/data
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:rw,noexec,nosuid,size=16m
     cap_drop:
       - ALL
     security_opt:

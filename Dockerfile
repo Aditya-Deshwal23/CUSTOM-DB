@@ -29,6 +29,7 @@ RUN --mount=type=cache,target=/root/.cache/cmake-fetchcontent,sharing=locked \
         -DFETCHCONTENT_BASE_DIR=/root/.cache/cmake-fetchcontent \
         -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG -flto" \
         -DCMAKE_EXE_LINKER_FLAGS="-flto -static-libstdc++ -static-libgcc" \
+        -DRELDB_WERROR=ON \
         -DRELDB_BUILD_TESTS=OFF \
         -DRELDB_BUILD_BENCHMARKS=OFF \
     && cmake --build build --config Release --parallel \

@@ -4,10 +4,18 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-and-test:
     name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -17,7 +25,7 @@ jobs:
       CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
       CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DRELDB_WERROR=ON
       - name: Build
@@ -47,14 +55,14 @@ jobs:
         run: scripts/verify_resume_claims.sh
       - name: Set up Python for API contract tests
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Install API test dependencies
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         run: |
-          python -m pip install -r tests/api/requirements.txt
-          python -m pip install -r tests/dashboard/requirements.txt
+          python -m pip install --require-hashes -r tests/api/requirements.txt
+          python -m pip install --require-hashes -r tests/dashboard/requirements.txt
           python -m playwright install --with-deps chromium
       - name: Run real-binary API contract tests
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
@@ -80,7 +88,7 @@ jobs:
         run: scripts/run_known_bugs.sh build/reldb_regression_tests
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-logs-${{ matrix.compiler }}-${{ matrix.build_type }}
           path: |
@@ -92,9 +100,10 @@ jobs:
   coverage:
     name: gcovr component coverage
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Install gcovr
@@ -145,7 +154,7 @@ jobs:
             done
           } | tee -a "${GITHUB_STEP_SUMMARY}"
       - name: Upload component coverage reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gcovr-component-coverage
           path: coverage/
@@ -154,19 +163,21 @@ jobs:
   link-check:
     name: Markdown link check
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Check documentation links
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --verbose --no-progress README.md docs/ LICENSE DIFFICULTIES_FACED.md
+          args: --verbose --no-progress --exclude '^https://api\.scorecard\.dev/projects/github\.com/Aditya-Deshwal23/CUSTOM-DB/badge$' README.md docs/ LICENSE DIFFICULTIES_FACED.md
           fail: true
 
   asan-ubsan:
     name: Address and undefined behavior sanitizers
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure
         run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=address -DRELDB_WERROR=ON
       - name: Build
@@ -174,11 +185,11 @@ jobs:
       - name: Test
         run: ctest --test-dir build-asan --output-on-failure
       - name: Set up Python for ASan API tests
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Install API test dependencies
-        run: python -m pip install -r tests/api/requirements.txt
+        run: python -m pip install --require-hashes -r tests/api/requirements.txt
       - name: Run API contract tests with ASan and UBSan binary
         env:
           RELDB_SERVER_BINARY: ${{ github.workspace }}/build-asan/relational_db
@@ -187,7 +198,7 @@ jobs:
         run: python tests/api/fuzz_api.py --binary build-asan/relational_db --iterations 200 --seed 731291
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-logs-asan-ubsan
           path: build-asan/Testing/Temporary/LastTest.log
@@ -196,8 +207,9 @@ jobs:
   tsan:
     name: Thread sanitizer stress
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure
         run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=thread -DRELDB_WERROR=ON
       - name: Build
@@ -219,7 +231,7 @@ jobs:
         run: python3 tests/api/fuzz_api.py --binary build-tsan/relational_db --iterations 200 --seed 731291 --concurrent
       - name: Upload TSan log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-logs-tsan
           path: tsan.log
@@ -228,8 +240,9 @@ jobs:
   crash-safety:
     name: WAL hard-kill recovery (200 iterations)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRELDB_WERROR=ON
       - name: Build regression tests
@@ -240,8 +253,9 @@ jobs:
   formatting-and-lint:
     name: Formatting and Dockerfile lint
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Install clang-format
@@ -251,21 +265,30 @@ jobs:
           git fetch origin "${GITHUB_BASE_REF:-main}" --depth=1
           FORMAT_BASE="origin/${GITHUB_BASE_REF:-main}" scripts/format.sh --check
       - name: hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with:
           dockerfile: Dockerfile
+      - name: Verify workflow hardening policy
+        run: python3 scripts/check_workflow_controls.py
+      - name: Validate Compose and shell scripts
+        run: |
+          docker compose config --quiet
+          bash -n scripts/*.sh
 
   docker-build:
     name: Docker image build
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build image without pushing
         run: docker build --tag custom-db:ci --build-arg VERSION=ci --build-arg VCS_REF=${GITHUB_SHA} .
       - name: Record built image size
         run: |
           docker image ls --no-trunc --filter reference=custom-db:ci | tee image-size.txt
           cat image-size.txt >> "${GITHUB_STEP_SUMMARY}"
+      - name: Dockle container configuration scan
+        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock goodwithtech/dockle:v0.4.15 --exit-code 1 --exit-level WARN custom-db:ci
       - name: Run the README quickstart against the built image
         env:
           IMAGE: custom-db:ci
@@ -278,7 +301,7 @@ jobs:
           HOST_PORT: "18080"
         run: scripts/demo_crash.sh
       - name: Scan image for high and critical vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: custom-db:ci
           format: table
@@ -286,3 +309,131 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: HIGH,CRITICAL
+
+  hardening:
+    name: Release binary hardening verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Configure hardened Release
+        run: cmake -S . -B build-hardening -DCMAKE_BUILD_TYPE=Release -DRELDB_BUILD_TESTS=OFF -DRELDB_BUILD_BENCHMARKS=OFF -DRELDB_WERROR=ON
+      - name: Build server binary
+        run: cmake --build build-hardening --parallel --target relational_db
+      - name: Install hardening checkers
+        run: sudo apt-get update && sudo apt-get install -y checksec devscripts
+      - name: Verify PIE, full RELRO, stack canary, NX, FORTIFY, and stack-clash protection
+        run: scripts/check_binary_hardening.sh build-hardening/relational_db
+
+  static-analysis:
+    name: Cppcheck and clang-tidy (informational)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install analyzers
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy cppcheck
+      - name: Configure compile database
+        run: cmake -S . -B build-analysis -DCMAKE_BUILD_TYPE=Debug -DRELDB_BUILD_TESTS=OFF -DRELDB_BUILD_BENCHMARKS=OFF
+      - name: Build core with conversion and shadow warnings
+        run: cmake --build build-analysis --parallel --target reldb_core
+      - name: Run cppcheck
+        run: cppcheck --project=build-analysis/compile_commands.json --enable=warning,performance,portability --suppress=missingIncludeSystem --error-exitcode=0
+      - name: Run clang-tidy security and correctness checks
+        run: clang-tidy -p build-analysis -checks='bugprone-*,cert-*,clang-analyzer-security.*' src/*.cpp src/api/*.cpp src/demo/*.cpp src/metrics/*.cpp src/storage/*.cpp
+
+  gitleaks:
+    name: Secret scanning
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  container-config:
+    name: Container configuration scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Scan Docker and Compose configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+
+  dynamic-security:
+    name: OpenAPI fuzz and OWASP ZAP scans
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build the service container
+        run: docker build --tag custom-db:security .
+      - name: Start isolated test service
+        run: |
+          docker run --detach --rm --name custom-db-security \
+            --publish 127.0.0.1:18082:8080 \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 128 --memory 512m --cpus 1 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --volume custom-db-security-data:/data \
+            --env PORT=8080 --env DB_PATH=/data/security.db \
+            custom-db:security
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18082/readyz; then exit 0; fi
+            sleep 1
+          done
+          docker logs custom-db-security
+          exit 1
+      - name: Schema-driven API property fuzzing
+        run: |
+          python3 -m pip install --require-hashes -r tests/api/requirements.txt
+          schemathesis run docs/openapi.yaml \
+            --base-url http://127.0.0.1:18082 \
+            --experimental=openapi-3.1 \
+            --rate-limit 4/s \
+            --checks all \
+            --hypothesis-max-examples 100 \
+            --workers 1
+      - name: OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@7c4deb10e6261301961c86d65d54a516394f9aed # v0.14.0
+        with:
+          target: http://127.0.0.1:18082
+          rules_file_name: .zap/rules.tsv
+          cmd_options: -J zap-baseline.json
+          fail_action: true
+          allow_issue_writing: false
+      - name: OWASP ZAP OpenAPI scan
+        uses: zaproxy/action-api-scan@77dfa9a647bb0f583e39d4df8531634d6ddd8df4 # v0.9.0
+        with:
+          target: /github/workspace/docs/openapi.yaml
+          format: openapi
+          rules_file_name: .zap/rules.tsv
+          cmd_options: -O http://127.0.0.1:18082 -J zap-api.json
+          fail_action: true
+          allow_issue_writing: false
+      - name: Upload dynamic security reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dynamic-security-reports
+          path: |
+            report_html.html
+            report_json.json
+            zap-baseline.json
+            zap-api.json
+          if-no-files-found: ignore
+      - name: Stop isolated test service
+        if: always()
+        run: docker stop custom-db-security || true

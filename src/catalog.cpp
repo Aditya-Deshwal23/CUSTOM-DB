@@ -573,10 +573,10 @@ void Catalog::Persist() {
 
 IndexKey16 IndexPrefix(const Value& value) {
     IndexKey16 key;
-    if (const auto* integer = std::get_if<int32_t>(&value)) {
-        key = EncodeIndexKey(*integer);
-    } else if (const auto* integer = std::get_if<int64_t>(&value)) {
-        key = EncodeIndexKey(*integer);
+    if (const auto* integer32 = std::get_if<int32_t>(&value)) {
+        key = EncodeIndexKey(*integer32);
+    } else if (const auto* integer64 = std::get_if<int64_t>(&value)) {
+        key = EncodeIndexKey(*integer64);
     } else if (const auto* number = std::get_if<double>(&value)) {
         uint64_t bits = 0;
         std::memcpy(&bits, number, sizeof(bits));
@@ -590,7 +590,8 @@ IndexKey16 IndexPrefix(const Value& value) {
         key = EncodeIndexKey(*boolean);
     } else if (const auto* text = std::get_if<std::string>(&value)) {
         uint64_t hash = 14695981039346656037ULL;
-        for (unsigned char ch : *text) {
+        for (const char raw_character : *text) {
+            const auto ch = static_cast<unsigned char>(raw_character);
             hash ^= ch;
             hash *= 1099511628211ULL;
         }

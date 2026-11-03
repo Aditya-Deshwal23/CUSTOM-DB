@@ -147,6 +147,9 @@ function(reldb_configure_project_target target)
     endif()
   else()
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    if(target STREQUAL "reldb_core")
+      target_compile_options(${target} PRIVATE -Wconversion -Wshadow)
+    endif()
     if(RELDB_WERROR)
       target_compile_options(${target} PRIVATE -Werror)
     endif()
@@ -232,3 +235,34 @@ endif()
 foreach(target IN LISTS project_targets)
   reldb_configure_project_target(${target})
 endforeach()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  foreach(target IN LISTS project_targets)
+    target_compile_options(${target} PRIVATE
+      $<$<CONFIG:Release>:-O2>
+      $<$<CONFIG:Release>:-D_FORTIFY_SOURCE=2>
+      $<$<CONFIG:Release>:-fstack-protector-strong>
+      $<$<CONFIG:Release>:-fstack-clash-protection>
+      $<$<CONFIG:Release>:-fPIE>
+    )
+    if(NOT target STREQUAL "reldb_core")
+      target_link_options(${target} PRIVATE
+        $<$<CONFIG:Release>:-pie>
+        $<$<CONFIG:Release>:-Wl,-z,relro,-z,now,-z,noexecstack>
+      )
+    endif()
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|i.86|AMD64)$")
+      target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-fcf-protection=full>)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+      target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-ftrivial-auto-var-init=zero>)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-flto>)
+      target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-flto>)
+      if(target STREQUAL "relational_db")
+        target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-static-libstdc++>)
+      endif()
+    endif()
+  endforeach()
+endif()

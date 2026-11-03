@@ -1,9 +1,11 @@
 # Security policy
 
-CUSTOM-DB is an educational storage engine and is not a hardened
-multi-tenant database. Do not expose a writable instance to an untrusted
-network without an independent security review and appropriate network
-controls.
+This page retains deployment safeguards for the documentation site. The
+canonical supported-version and response-target policy is in the root
+[SECURITY.md](../SECURITY.md). CUSTOM-DB is an educational storage engine and
+is not a hardened multi-tenant database. Do not expose a writable instance to
+an untrusted network without an independent security review and appropriate
+network controls.
 
 ## Reporting a vulnerability
 

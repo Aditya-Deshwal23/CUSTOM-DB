@@ -19,11 +19,14 @@ ctest --test-dir build-release --output-on-failure
 hadolint Dockerfile
 docker compose config --quiet
 bash -n scripts/demo_crash.sh scripts/quickstart.sh
+pre-commit run --all-files
 ```
 
 For API and dashboard tests, install the pinned Python dependencies listed in
-`tests/api/requirements.txt` and `tests/dashboard/requirements.txt`. For
-sanitizer commands and the CI coverage report, inspect
+`tests/api/requirements.txt` and `tests/dashboard/requirements.txt` with
+`python -m pip install --require-hashes -r <requirements-file>`. Update the
+lock files from their adjacent `.in` files with `pip-compile
+--generate-hashes`. For sanitizer commands and the CI coverage report, inspect
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
 
 The gcovr job groups the existing source layout as follows:

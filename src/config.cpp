@@ -100,7 +100,8 @@ std::vector<std::string> ReadOrigins() {
 std::string EscapeJson(const std::string& value) {
     std::string escaped;
     escaped.reserve(value.size() + 2U);
-    for (const unsigned char character : value) {
+    for (const char raw_character : value) {
+        const auto character = static_cast<unsigned char>(raw_character);
         switch (character) {
             case '"':
                 escaped += "\\\"";

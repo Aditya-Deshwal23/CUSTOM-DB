@@ -410,7 +410,7 @@ class BPlusTree {
             capacity += kLeafCapacity;
             page_id = bpt_detail::ReadPageId(leaf->next_page_id.data());
         }
-        return capacity == 0 ? 0.0 : static_cast<double>(occupied) / capacity;
+        return capacity == 0 ? 0.0 : static_cast<double>(occupied) / static_cast<double>(capacity);
     }
 
     struct InspectionSummary {
@@ -683,7 +683,9 @@ class BPlusTree {
             }
         }
         const uint64_t capacity = summary.leaf_pages * kLeafCapacity;
-        summary.fill_factor = capacity == 0 ? 0.0 : static_cast<double>(summary.entries) / capacity;
+        summary.fill_factor =
+            capacity == 0 ? 0.0
+                          : static_cast<double>(summary.entries) / static_cast<double>(capacity);
         return summary;
     }
 

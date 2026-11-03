@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible defect in CUSTOM-DB.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials or private database contents.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Include the expected and observed behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest repeatable sequence and sanitized input.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Revision or image tag
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and relevant logs
+      description: Include OS, compiler/container details, and redacted logs.
+    validations:
+      required: true

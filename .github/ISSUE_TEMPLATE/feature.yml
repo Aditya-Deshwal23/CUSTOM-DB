@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused improvement within the project scope.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable behavior, boundaries, and compatibility.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Tests and documentation
+      description: Suggest measurable acceptance tests and documentation changes.
+    validations:
+      required: true

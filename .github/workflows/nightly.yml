@@ -4,49 +4,115 @@ on:
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
+    inputs:
+      api_fuzz_iterations:
+        description: Seeded HTTP API fuzz iterations
+        type: number
+        default: 5000
+      tsan_stress_seconds:
+        description: SQL concurrency stress duration
+        type: number
+        default: 60
+      crash_iterations:
+        description: Hard-kill recovery iterations
+        type: number
+        default: 5000
+      grammar_fuzz_seconds:
+        description: libFuzzer duration per target
+        type: number
+        default: 600
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   api-fuzzing:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure API fuzz target
         run: cmake -S . -B build-api-fuzz -DCMAKE_BUILD_TYPE=Release -DRELDB_BUILD_TESTS=OFF -DRELDB_BUILD_BENCHMARKS=OFF
       - name: Build API server
         run: cmake --build build-api-fuzz --parallel --target relational_db
-      - name: Fuzz HTTP API input (5,000 seeded requests)
-        run: python3 tests/api/fuzz_api.py --binary build-api-fuzz/relational_db --iterations 5000 --seed 907213
+      - name: Fuzz HTTP API input
+        env:
+          FUZZ_ITERATIONS: ${{ inputs.api_fuzz_iterations || 5000 }}
+        run: python3 tests/api/fuzz_api.py --binary build-api-fuzz/relational_db --iterations "${FUZZ_ITERATIONS}" --seed 907213
+      - name: Upload API fuzz failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-api-fuzz-failure
+          path: |
+            build-api-fuzz/Testing/Temporary/
+            *.log
+          if-no-files-found: ignore
 
   concurrency-tsan-stress:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure ThreadSanitizer build
         run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=thread -DRELDB_WERROR=ON
       - name: Build regression tests
         run: cmake --build build-tsan --parallel --target reldb_regression_tests
       - name: Prepare TSan runtime
         run: sudo sysctl vm.mmap_rnd_bits=28
-      - name: Run 60-second seeded SQL concurrency stress
+      - name: Run seeded SQL concurrency stress
         env:
-          RELDB_CONCURRENCY_STRESS_SECONDS: "60"
-        run: build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress
+          RELDB_CONCURRENCY_STRESS_SECONDS: ${{ inputs.tsan_stress_seconds || 60 }}
+        shell: bash
+        run: |
+          set -o pipefail
+          build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress | tee nightly-tsan.log
+      - name: Upload TSan failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-tsan-failure
+          path: |
+            nightly-tsan.log
+            build-tsan/Testing/Temporary/
+          if-no-files-found: ignore
 
   crash-safety:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRELDB_WERROR=ON
       - name: Build regression tests
         run: cmake --build build --parallel --target reldb_regression_tests
-      - name: Run 5,000 seeded hard-kill iterations
-        run: tools/crashtest build/reldb_regression_tests 5000
+      - name: Run seeded hard-kill recovery
+        env:
+          CRASH_ITERATIONS: ${{ inputs.crash_iterations || 5000 }}
+        shell: bash
+        run: |
+          set -o pipefail
+          tools/crashtest build/reldb_regression_tests "${CRASH_ITERATIONS}" | tee nightly-crash.log
+      - name: Upload crash-safety failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-crash-failure
+          path: |
+            nightly-crash.log
+            build/Testing/Temporary/
+            /tmp/reldb-crash-*
+          if-no-files-found: ignore
 
   exhaustive-page-checksum:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRELDB_WERROR=ON
       - name: Build tests
@@ -55,14 +121,62 @@ jobs:
         env:
           RELDB_EXHAUSTIVE_PAGE_CHECKSUM: "1"
         run: build/reldb_regression_tests --gtest_filter=DiskManagerTest.DetectsSingleBitErrorsInSampledOrExhaustivePageBits
+      - name: Upload page-checksum failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-page-checksum-failure
+          path: |
+            build/Testing/Temporary/
+            *.log
+          if-no-files-found: ignore
 
   sql-grammar-fuzz:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure Clang libFuzzer target
         run: CC=clang CXX=clang++ cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DRELDB_BUILD_FUZZERS=ON -DRELDB_BUILD_BENCHMARKS=OFF -DRELDB_BUILD_TESTS=OFF
       - name: Build SQL grammar fuzzer
         run: cmake --build build-fuzz --target sql_grammar_fuzz --parallel
-      - name: Fuzz SQL grammar under ASan and UBSan for ten minutes
-        run: build-fuzz/sql_grammar_fuzz tests/sql_fuzz_corpus -max_total_time=600 -timeout=5
+      - name: Fuzz SQL grammar under ASan and UBSan
+        env:
+          FUZZ_SECONDS: ${{ inputs.grammar_fuzz_seconds || 600 }}
+        run: build-fuzz/sql_grammar_fuzz tests/sql_fuzz_corpus -max_total_time="${FUZZ_SECONDS}" -timeout=5
+      - name: Upload grammar-fuzz failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-grammar-fuzz-failure
+          path: |
+            crash-*
+            build-fuzz/
+          if-no-files-found: ignore
+
+  failure-report:
+    if: failure()
+    needs:
+      - api-fuzzing
+      - concurrency-tsan-stress
+      - crash-safety
+      - exhaustive-page-checksum
+      - sql-grammar-fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the Nightly failed issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          issue_number="$(gh issue list --repo "${REPOSITORY}" --state open --search 'in:title "Nightly failed"' --json number,title --jq '.[] | select(.title == "Nightly failed") | .number' | head -n 1)"
+          body="Nightly workflow failed: ${RUN_URL}"
+          if [[ -n "${issue_number}" ]]; then
+            gh issue comment "${issue_number}" --repo "${REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${REPOSITORY}" --title "Nightly failed" --body "${body}"
+          fi

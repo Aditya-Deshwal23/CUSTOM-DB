@@ -670,8 +670,8 @@ void IDiskManager::WritePageImage(page_id_t page_id, const uint8_t* image) {
         throw DbError(ErrorCode::INVALID_ARGUMENT, "Invalid raw page image", page_id);
     }
     const auto get_u16 = [](const uint8_t* bytes) {
-        return static_cast<uint16_t>(bytes[0]) |
-               static_cast<uint16_t>(static_cast<uint16_t>(bytes[1]) << 8U);
+        return static_cast<uint16_t>(static_cast<uint16_t>(bytes[0]) |
+                                     static_cast<uint16_t>(bytes[1] << 8U));
     };
     const auto get_u64 = [](const uint8_t* bytes) {
         uint64_t value = 0;
