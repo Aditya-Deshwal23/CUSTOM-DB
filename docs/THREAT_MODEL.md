@@ -27,6 +27,8 @@ boundary.
 STRIDE concerns are threat categories, not a claim that every attack is
 prevented. Network exposure, operator credentials, the host kernel, and
 compromise of a trusted GitHub account remain outside the engine's protection.
+`TRUST_PROXY_HOPS` defaults to `0`; forwarded protocol is used for HSTS only
+when the deployment explicitly configures a trusted proxy chain.
 `DB_PATH` and `WAL_PATH` are trusted deployment configuration; operators must
 not populate them from client-controlled values. CodeQL path-injection
 findings on these storage opens are accepted on that trust-boundary basis.

@@ -206,6 +206,7 @@ Config Config::LoadFromEnvironment() {
         ReadUnsigned("STATEMENT_TIMEOUT_MS", config.statement_timeout_ms);
     config.rate_limit_rps = ReadPositiveDouble("RATE_LIMIT_RPS", config.rate_limit_rps);
     config.rate_limit_burst = ReadPositiveDouble("RATE_LIMIT_BURST", config.rate_limit_burst);
+    config.trust_proxy_hops = ReadUnsigned("TRUST_PROXY_HOPS", 0U, true);
     config.max_db_bytes = ReadUnsigned("MAX_DB_BYTES", config.max_db_bytes, true);
 
     const std::string log_level = EnvironmentValue("LOG_LEVEL");
@@ -233,8 +234,9 @@ Config Config::LoadFromEnvironment() {
         config.max_result_rows > MAX_RESULT_ROWS || config.statement_timeout_ms > 600000U ||
         config.wal_sync_interval_ms > 600000U || config.slow_query_ms > 3600000U ||
         config.rate_limit_rps > 1000000.0 || config.rate_limit_burst < 1.0 ||
-        config.rate_limit_burst > 1000000.0 || config.drain_timeout_ms > 600000U ||
-        config.inspect_max_nodes > 200U || config.inspect_max_pages > 4096U) {
+        config.rate_limit_burst > 1000000.0 || config.trust_proxy_hops > 16U ||
+        config.drain_timeout_ms > 600000U || config.inspect_max_nodes > 200U ||
+        config.inspect_max_pages > 4096U) {
         throw std::invalid_argument("Configured limits are outside their supported ranges");
     }
     return config;
@@ -265,6 +267,7 @@ std::string Config::EffectiveJson() const {
            ",\"STATEMENT_TIMEOUT_MS\":" + std::to_string(statement_timeout_ms) +
            ",\"RATE_LIMIT_RPS\":" + std::to_string(rate_limit_rps) +
            ",\"RATE_LIMIT_BURST\":" + std::to_string(rate_limit_burst) +
+           ",\"TRUST_PROXY_HOPS\":" + std::to_string(trust_proxy_hops) +
            ",\"MAX_DB_BYTES\":" + std::to_string(max_db_bytes) + ",\"LOG_LEVEL\":\"" +
            EscapeJson(log_level) + "\",\"DEMO_LOAD\":" + (demo_load ? "true" : "false") +
            ",\"SLOW_QUERY_MS\":" + std::to_string(slow_query_ms) +

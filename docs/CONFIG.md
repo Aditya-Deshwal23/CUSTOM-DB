@@ -25,6 +25,7 @@ the table says otherwise.
 | `STATEMENT_TIMEOUT_MS` | `2000` | Integer `1`–`600000`. |
 | `RATE_LIMIT_RPS` | `20` | Finite number greater than `0` and at most `1000000`. |
 | `RATE_LIMIT_BURST` | `40` | Finite number `1`–`1000000`. This companion setting is retained for the existing per-IP token bucket. |
+| `TRUST_PROXY_HOPS` | `0` | Integer `0`–`16`; only a configured trusted forwarded-protocol value of `https` enables HSTS. Set this only when the service is behind the corresponding trusted proxy chain. |
 | `MAX_DB_BYTES` | `0` (disabled) | `0` disables the quota; otherwise any positive unsigned 64-bit byte count. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `off`. |
 | `DEMO_LOAD` | `0` | `0` or `1`; enables the optional in-process point-lookup workload. |

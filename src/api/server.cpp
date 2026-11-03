@@ -131,7 +131,7 @@ ApiServer::ApiServer(std::shared_ptr<BufferPoolManager> bpm,
 ApiServer::~ApiServer() = default;
 
 void ApiServer::Run(int port) {
-    impl_->app.bindaddr("0.0.0.0").port(port).multithreaded().run();
+    impl_->app.server_name("").bindaddr("0.0.0.0").port(port).multithreaded().run();
 }
 
 void ApiServer::BeginDrain() {

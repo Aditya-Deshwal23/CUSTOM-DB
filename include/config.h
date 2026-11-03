@@ -44,6 +44,7 @@ struct Config {
     uint64_t statement_timeout_ms{2000};
     double rate_limit_rps{20.0};
     double rate_limit_burst{40.0};
+    uint64_t trust_proxy_hops{0};
     uint64_t max_db_bytes{0};
     std::string log_level{"info"};
     bool demo_load{false};

@@ -110,7 +110,7 @@ crow::response JsonResponse(int status, const crow::json::wvalue& value);
 crow::response ErrorResponse(int status, std::string code, std::string message,
                              const std::string& request_id, size_t line = 0, size_t column = 0,
                              std::string hint = {});
-void ApplyResponseHeaders(crow::response& response);
+void ApplyResponseHeaders(crow::response& response, bool trusted_https);
 std::string BindParameters(const std::string& sql, const crow::json::rvalue& params);
 std::string SqlStatementName(SqlStatementKind kind);
 bool ApiKeyMatches(const std::string& expected, const std::string& supplied);

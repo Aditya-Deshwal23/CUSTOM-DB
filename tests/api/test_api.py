@@ -1,9 +1,11 @@
 import contextlib
+import http.client
 import json
 import os
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +20,29 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 SERVER = os.environ.get(
     "RELDB_SERVER_BINARY", os.path.join(ROOT, "build-debug", "relational_db")
 )
+EXPECTED_SECURITY_HEADERS = {
+    "Permissions-Policy": (
+        "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), browsing-topics=(), "
+        "camera=(), clipboard-read=(), clipboard-write=(), cross-origin-isolated=(), "
+        "display-capture=(), encrypted-media=(), execution-while-not-rendered=(), "
+        "execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), "
+        "identity-credentials-get=(), join-ad-interest-group=(), keyboard-map=(), "
+        "local-fonts=(), magnetometer=(), microphone=(), midi=(), navigation-override=(), "
+        "payment=(), picture-in-picture=(), publickey-credentials-get=(), run-ad-auction=(), "
+        "screen-wake-lock=(), shared-storage=(), speaker-selection=(), storage-access=(), "
+        "sync-xhr=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()"
+    ),
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none'; object-src 'none'; manifest-src 'self'"
+    ),
+}
 
 
 @contextlib.contextmanager
@@ -336,8 +361,186 @@ def test_catalog_foreign_keys_survive_restart(tmp_path):
 
 
 def test_static_dashboard_security_headers(api_server):
-    _, _, headers = http_request(api_server, "/")
-    assert headers["Content-Security-Policy"].startswith("default-src 'self'")
+    for path in ("/", "/index.js", "/index.css", "/api/v1/version", "/api/v1/snapshot"):
+        status, _, headers = http_request(api_server, path)
+        assert status == 200
+        for name, value in EXPECTED_SECURITY_HEADERS.items():
+            assert headers.get(name) == value
+        if path.startswith("/api/"):
+            assert headers.get("Cache-Control") == "no-store"
+        assert not headers.get("Server")
+
+    _, _, api_headers = http_request(api_server, "/api/v1/version")
+    assert api_headers.get("Cache-Control") == "no-store"
+    assert "Strict-Transport-Security" not in api_headers
+
+
+def test_security_headers_apply_to_api_errors(api_server, tmp_path):
+    status, _, headers = http_request(
+        api_server,
+        "/api/v1/query",
+        raw=b"{",
+        headers={"Content-Type": "application/json"},
+    )
+    assert status == 400
+    for name, value in EXPECTED_SECURITY_HEADERS.items():
+        assert headers.get(name) == value
+    assert headers.get("Cache-Control") == "no-store"
+    assert not headers.get("Server")
+
+    missing_status, _, missing_headers = http_request(api_server, "/api/v1/tables/no_such_table")
+    assert missing_status == 404
+    for name, value in EXPECTED_SECURITY_HEADERS.items():
+        assert missing_headers.get(name) == value
+
+    static_missing_status, _, static_missing_headers = http_request(api_server, "/missing.js")
+    assert static_missing_status == 404
+    for name, value in EXPECTED_SECURITY_HEADERS.items():
+        assert static_missing_headers.get(name) == value
+
+    method_status, _, method_headers = http_request(
+        api_server, "/api/v1/version", method="POST"
+    )
+    assert method_status == 405
+    for name, value in EXPECTED_SECURITY_HEADERS.items():
+        assert method_headers.get(name) == value
+    static_method_status, _, static_method_headers = http_request(
+        api_server, "/index.js", method="POST"
+    )
+    assert static_method_status == 405
+    for name, value in EXPECTED_SECURITY_HEADERS.items():
+        assert static_method_headers.get(name) == value
+
+    with running_server(tmp_path, {"MAX_BODY_BYTES": "64"}) as (limited_url, _):
+        limited_status, _, limited_headers = http_request(
+            limited_url,
+            "/api/v1/query",
+            raw=b" " * 80,
+            headers={"Content-Type": "application/json"},
+        )
+        assert limited_status == 413
+        for name, value in EXPECTED_SECURITY_HEADERS.items():
+            assert limited_headers.get(name) == value
+
+    with running_server(
+        tmp_path, {"RATE_LIMIT_RPS": "0.1", "RATE_LIMIT_BURST": "1"}
+    ) as (limited_url, _):
+        limited_status, _, rate_headers = http_request(limited_url, "/api/v1/version")
+        assert limited_status == 429
+        for name, value in EXPECTED_SECURITY_HEADERS.items():
+            assert rate_headers.get(name) == value
+
+
+def test_hsts_requires_trusted_forwarded_proto(tmp_path):
+    with running_server(tmp_path, {"TRUST_PROXY_HOPS": "0"}) as (base_url, _):
+        _, _, headers = http_request(
+            base_url, "/api/v1/version", headers={"X-Forwarded-Proto": "https"}
+        )
+        assert "Strict-Transport-Security" not in headers
+
+    with running_server(tmp_path, {"TRUST_PROXY_HOPS": "1"}) as (base_url, _):
+        _, _, trusted_headers = http_request(
+            base_url, "/api/v1/version", headers={"X-Forwarded-Proto": "https"}
+        )
+        _, _, untrusted_headers = http_request(
+            base_url, "/api/v1/version", headers={"X-Forwarded-Proto": "http"}
+        )
+        assert trusted_headers.get("Strict-Transport-Security") == (
+            "max-age=31536000; includeSubDomains"
+        )
+        assert "Strict-Transport-Security" not in untrusted_headers
+
+    with running_server(tmp_path, {"TRUST_PROXY_HOPS": "2"}) as (base_url, _):
+        _, _, trusted_headers = http_request(
+            base_url, "/api/v1/version", headers={"X-Forwarded-Proto": "https, http"}
+        )
+        _, _, untrusted_headers = http_request(
+            base_url, "/api/v1/version", headers={"X-Forwarded-Proto": "http, https"}
+        )
+        assert trusted_headers.get("Strict-Transport-Security") == (
+            "max-age=31536000; includeSubDomains"
+        )
+        assert "Strict-Transport-Security" not in untrusted_headers
+
+
+def test_security_headers_apply_to_storage_error_500(tmp_path):
+    database_path = tmp_path / "header-corrupt.db"
+    with running_server(tmp_path, db_path=database_path) as (base_url, process):
+        assert post_sql(base_url, "CREATE TABLE header_corrupt (id INT PRIMARY KEY)")[0] == 200
+        assert post_sql(base_url, "INSERT INTO header_corrupt VALUES (1)")[0] == 200
+        rows_status, rows, _ = request_json(
+            base_url, "/api/v1/tables/header_corrupt/rows?limit=1&order=id"
+        )
+        assert rows_status == 200
+        page_id = int(rows["rows"][0]["rid"].split(":", 1)[0])
+        process.terminate()
+        process.wait(timeout=5)
+
+    with database_path.open("r+b") as database:
+        database.seek(page_id * 4096)
+        page = bytearray(database.read(4096))
+        page[0] ^= 1
+        database.seek(page_id * 4096)
+        database.write(page)
+        database.flush()
+
+    with running_server(tmp_path, db_path=database_path) as (base_url, _):
+        status, _, headers = post_sql(base_url, "SELECT * FROM header_corrupt")
+        assert status == 500
+        for name, value in EXPECTED_SECURITY_HEADERS.items():
+            assert headers.get(name) == value
+        assert headers.get("Cache-Control") == "no-store"
+        assert not headers.get("Server")
+
+
+def test_security_headers_apply_while_draining_503(tmp_path):
+    with running_server(tmp_path, {"DRAIN_TIMEOUT_MS": "5000"}) as (base_url, process):
+        assert post_sql(base_url, "CREATE TABLE draining_headers (id INT PRIMARY KEY)")[0] == 200
+        values = ",".join(f"({value})" for value in range(1000))
+        assert post_sql(base_url, f"INSERT INTO draining_headers VALUES {values}")[0] == 200
+
+        request_started = threading.Event()
+
+        def run_active_query():
+            request_started.set()
+            try:
+                http_request(
+                    base_url,
+                    "/api/v1/query",
+                    {"sql": "SELECT * FROM draining_headers"},
+                )
+            except (
+                http.client.IncompleteRead,
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionResetError,
+            ):
+                pass
+
+        active_query = threading.Thread(target=run_active_query)
+        active_query.start()
+        request_started.wait()
+        time.sleep(0.001)
+        process.send_signal(signal.SIGTERM)
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                status, _, headers = http_request(base_url, "/readyz", timeout=0.1)
+            except (urllib.error.URLError, TimeoutError):
+                time.sleep(0.001)
+                continue
+            if status == 503:
+                break
+        else:
+            pytest.fail("server stopped before exposing its draining readiness response")
+
+        for name, value in EXPECTED_SECURITY_HEADERS.items():
+            assert headers.get(name) == value
+        assert headers.get("Cache-Control") == "no-store"
+        assert not headers.get("Server")
+        active_query.join(timeout=3)
+        assert not active_query.is_alive()
 
 
 def test_malformed_json_body_limit_and_content_type(api_server, tmp_path):

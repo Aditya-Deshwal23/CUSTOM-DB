@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <iostream>
 #include <string_view>
@@ -88,6 +89,40 @@ std::string MethodName(crow::HTTPMethod method) {
         default:
             return "UNKNOWN";
     }
+}
+
+bool IsTrustedHttps(const crow::request& request, uint64_t trusted_hops) {
+    if (trusted_hops == 0U) {
+        return false;
+    }
+    const std::string forwarded_proto = request.get_header_value("X-Forwarded-Proto");
+    if (forwarded_proto.empty() || forwarded_proto.size() > 256U) {
+        return false;
+    }
+
+    size_t end = forwarded_proto.size();
+    for (uint64_t hop = 1U; hop < trusted_hops; ++hop) {
+        const size_t separator = forwarded_proto.rfind(',', end - 1U);
+        if (separator == std::string::npos) {
+            return false;
+        }
+        end = separator;
+    }
+    const size_t separator = forwarded_proto.rfind(',', end - 1U);
+    size_t begin = separator == std::string::npos ? 0U : separator + 1U;
+    while (begin < end && std::isspace(static_cast<unsigned char>(forwarded_proto[begin])) != 0) {
+        ++begin;
+    }
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(forwarded_proto[end - 1U])) != 0) {
+        --end;
+    }
+    return end - begin == 5U &&
+           std::tolower(static_cast<unsigned char>(forwarded_proto[begin])) == 'h' &&
+           std::tolower(static_cast<unsigned char>(forwarded_proto[begin + 1U])) == 't' &&
+           std::tolower(static_cast<unsigned char>(forwarded_proto[begin + 2U])) == 't' &&
+           std::tolower(static_cast<unsigned char>(forwarded_proto[begin + 3U])) == 'p' &&
+           std::tolower(static_cast<unsigned char>(forwarded_proto[begin + 4U])) == 's';
 }
 
 }  // namespace
@@ -261,7 +296,15 @@ void ApiMiddleware::after_handle(crow::request& request, crow::response& respons
         }
     } completion{*this, ctx};
 
-    ApplyResponseHeaders(response);
+    ApplyResponseHeaders(response, IsTrustedHttps(request, config.trust_proxy_hops));
+    if (request.url.rfind("/api/", 0) == 0) {
+        const auto cache_header = response.headers.find("Cache-Control");
+        if (cache_header == response.headers.end()) {
+            response.add_header("Cache-Control", "no-store");
+        } else {
+            cache_header->second = "no-store";
+        }
+    }
     response.add_header("X-Request-Id", ctx.request_id);
     const std::string origin = request.get_header_value("Origin");
     if (!origin.empty() && IsAllowedOrigin(config, origin)) {

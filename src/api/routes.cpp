@@ -1475,6 +1475,40 @@ void ApiServer::Impl::RegisterRoutes() {
     CROW_ROUTE(app, "/api/v1/admin/checkpoint")
         .methods(crow::HTTPMethod::OPTIONS)(
             [this](const crow::request& request) { return HandlePreflight(*this, request); });
+
+    CROW_ROUTE(app, "/api/v1/<path>")
+        .methods(crow::HTTPMethod::GET)(
+            [this](const crow::request& request, const std::string& path) {
+                (void)path;
+                ApiMiddleware::context& context = RequestContext(app, request);
+                return ErrorResponse(404, "NOT_FOUND", "API route not found", context.request_id);
+            });
+    CROW_ROUTE(app, "/api/v1/<path>")
+        .methods(crow::HTTPMethod::POST, crow::HTTPMethod::PUT, crow::HTTPMethod::PATCH,
+                 crow::HTTPMethod::DELETE, crow::HTTPMethod::HEAD)(
+            [this](const crow::request& request, const std::string& path) {
+                (void)path;
+                ApiMiddleware::context& context = RequestContext(app, request);
+                return ErrorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed",
+                                     context.request_id);
+            });
+
+    CROW_ROUTE(app, "/<path>")
+        .methods(crow::HTTPMethod::GET)(
+            [this](const crow::request& request, const std::string& path) {
+                (void)path;
+                ApiMiddleware::context& context = RequestContext(app, request);
+                return ErrorResponse(404, "NOT_FOUND", "Route not found", context.request_id);
+            });
+    CROW_ROUTE(app, "/<path>")
+        .methods(crow::HTTPMethod::POST, crow::HTTPMethod::PUT, crow::HTTPMethod::PATCH,
+                 crow::HTTPMethod::DELETE, crow::HTTPMethod::HEAD)(
+            [this](const crow::request& request, const std::string& path) {
+                (void)path;
+                ApiMiddleware::context& context = RequestContext(app, request);
+                return ErrorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed",
+                                     context.request_id);
+            });
 }
 
 }  // namespace relational_db

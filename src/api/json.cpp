@@ -46,6 +46,7 @@ std::string SqlLiteral(const crow::json::rvalue& value) {
 crow::response JsonResponse(int status, const crow::json::wvalue& value) {
     crow::response response(status, value.dump());
     response.add_header("Content-Type", "application/json; charset=utf-8");
+    response.add_header("Cache-Control", "no-store");
     return response;
 }
 
@@ -71,12 +72,32 @@ crow::response ErrorResponse(int status, std::string code, std::string message,
     return JsonResponse(status, response);
 }
 
-void ApplyResponseHeaders(crow::response& response) {
+void ApplyResponseHeaders(crow::response& response, bool trusted_https) {
     response.add_header("X-Content-Type-Options", "nosniff");
     response.add_header("X-Frame-Options", "DENY");
     response.add_header("Referrer-Policy", "no-referrer");
     response.add_header("Content-Security-Policy",
-                        "default-src 'self'; connect-src 'self' http://127.0.0.1:8080");
+                        "default-src 'none'; script-src 'self'; style-src 'self'; "
+                        "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+                        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+                        "object-src 'none'; manifest-src 'self'");
+    response.add_header("Cross-Origin-Opener-Policy", "same-origin");
+    response.add_header("Cross-Origin-Resource-Policy", "same-origin");
+    response.add_header(
+        "Permissions-Policy",
+        "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), browsing-topics=(), "
+        "camera=(), clipboard-read=(), clipboard-write=(), cross-origin-isolated=(), "
+        "display-capture=(), encrypted-media=(), execution-while-not-rendered=(), "
+        "execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), "
+        "identity-credentials-get=(), join-ad-interest-group=(), keyboard-map=(), "
+        "local-fonts=(), magnetometer=(), microphone=(), midi=(), navigation-override=(), "
+        "payment=(), picture-in-picture=(), publickey-credentials-get=(), run-ad-auction=(), "
+        "screen-wake-lock=(), shared-storage=(), speaker-selection=(), storage-access=(), "
+        "sync-xhr=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()");
+    if (trusted_https) {
+        response.add_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    }
+    response.headers.erase("Server");
 }
 
 std::string BindParameters(const std::string& sql, const crow::json::rvalue& params) {

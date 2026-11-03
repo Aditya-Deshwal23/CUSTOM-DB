@@ -42,6 +42,8 @@ services:
         value: "20"
       - key: RATE_LIMIT_BURST
         value: "40"
+      - key: TRUST_PROXY_HOPS
+        value: "1"
       - key: MAX_DB_BYTES
         value: "0"
       - key: LOG_LEVEL
