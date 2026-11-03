@@ -408,7 +408,10 @@ jobs:
             --workers 1
       - name: Show test service logs after failure
         if: failure()
-        run: docker logs --tail 200 custom-db-security
+        run: |
+          docker logs custom-db-security 2>&1 \
+            | grep -E '(/api/v1/tables/[^ ]*/rows|/api/v1/snapshot|/api/v1/catalog|/api/v1/inspect/wal|/api/v1/inspect/indexes/[^ ]*/tree|/api/v1/inspect/freelist|/api/v1/admin/checkpoint|"status":(429|503))' \
+            | tail -n 1000 || true
       - name: OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@7c4deb10e6261301961c86d65d54a516394f9aed # v0.14.0
         with:
