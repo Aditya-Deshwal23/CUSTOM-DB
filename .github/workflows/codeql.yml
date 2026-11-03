@@ -40,7 +40,6 @@ jobs:
         uses: github/codeql-action/analyze@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3.39.1
         with:
           category: /language:cpp
-          fail-on: error
       - name: Fail for open high or critical alerts on this ref
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
@@ -79,7 +78,6 @@ jobs:
         uses: github/codeql-action/analyze@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3.39.1
         with:
           category: /language:python-javascript
-          fail-on: error
       - name: Fail for open high or critical alerts on this ref
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:

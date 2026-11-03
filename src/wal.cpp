@@ -207,7 +207,8 @@ void SyncParentDirectory(const std::string& path) {
     const size_t separator = path.find_last_of('/');
     const std::string directory =
         separator == std::string::npos ? "." : (separator == 0 ? "/" : path.substr(0, separator));
-    // lgtm [cpp/path-injection] Trusted WAL_PATH config, not HTTP input.
+    // Trusted WAL_PATH config, not HTTP input.
+    // lgtm [cpp/path-injection]
     const int directory_fd = open(directory.c_str(), O_RDONLY
 #ifdef O_DIRECTORY
                                                          | O_DIRECTORY
@@ -368,7 +369,8 @@ WriteAheadLog::WriteAheadLog(const std::string& database_path, const std::string
     file_descriptor_ =
         _open(filename_.c_str(), _O_RDWR | _O_CREAT | _O_BINARY, _S_IREAD | _S_IWRITE);
 #else
-    // lgtm [cpp/path-injection] Trusted WAL_PATH config, not HTTP input.
+    // Trusted WAL_PATH config, not HTTP input.
+    // lgtm [cpp/path-injection]
     file_descriptor_ = open(filename_.c_str(),
                             O_RDWR | O_CREAT
 #ifdef O_CLOEXEC

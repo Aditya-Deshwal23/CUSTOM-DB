@@ -20,13 +20,16 @@ boundary.
 | HTTP surface | API-key checks on protected routes; no claim of user identity | JSON/schema validation, bounded bodies and SQL, parameter binding | Request IDs and structured logs | API key redaction; same-origin security headers; no raw inspector bytes by default | Rate limits, statement/result limits, bounded connections and timeouts | READ_ONLY and admin authorization; non-root service |
 | Parser | Not an identity provider; caller remains untrusted | Lexer/parser validate grammar and parameter positions | Parse errors carry source position | Errors avoid returning stored tuple data | Configured SQL/depth/token/node/list bounds; grammar fuzzer | AST values are bound/validated before execution |
 | Executor | Statement context is per request | Constraints, transaction rollback, typed values and planner checks | Commit metadata and WAL records identify durable changes | Result shape and row bounds; inspector disclosure is separately gated | Statement time, row, memory, result and admission bounds | One exclusive writer gate; no general-purpose extension execution |
-| Storage files | Files are trusted only when owned by the deployment | Explicit-endian formats, CRC32C, WAL recovery and integrity check | WAL LSN/commit records | File permissions and private volume are operator responsibilities | Database quota, bounded page/buffer configuration | Container UID 10001; no untrusted file import |
+| Storage files | Files and DB_PATH/WAL_PATH values are deployment-controlled, not request-controlled | Explicit-endian formats, CRC32C, WAL recovery and integrity check | WAL LSN/commit records | File permissions and private volume are operator responsibilities | Database quota, bounded page/buffer configuration | Container UID 10001; no untrusted file import |
 | Container/runtime | Image identity and registry permissions | Digest-pinned base images, image scan, cosign verification | Release tags and signed digest attestations | Read-only root, dropped capabilities, isolated data volume | PID, memory, CPU, tmpfs and file descriptor limits | Non-root UID, no-new-privileges, no writable root filesystem |
 | CI/CD | GitHub identities and least-privilege job tokens | SHA-pinned actions, dependency updates, protected release process | Workflow logs, immutable run records, signed image digest | Secret scanning and no secrets in PR code | Job timeouts, concurrency cancellation, bounded scan/fuzz jobs | Scoped workflow permissions, CodeQL, Scorecard and branch protection checklist |
 
 STRIDE concerns are threat categories, not a claim that every attack is
 prevented. Network exposure, operator credentials, the host kernel, and
 compromise of a trusted GitHub account remain outside the engine's protection.
+`DB_PATH` and `WAL_PATH` are trusted deployment configuration; operators must
+not populate them from client-controlled values. CodeQL path-injection
+findings on these storage opens are accepted on that trust-boundary basis.
 
 ## Mitigations and evidence
 

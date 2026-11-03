@@ -113,7 +113,8 @@ void SyncParentDirectory(const std::string& path) {
     const std::string directory = separator == std::string::npos ? "."
                                   : separator == 0               ? "/"
                                                                  : path.substr(0, separator);
-    // lgtm [cpp/path-injection] Trusted DB_PATH config, not HTTP input.
+    // Trusted DB_PATH config, not HTTP input.
+    // lgtm [cpp/path-injection]
     const int directory_fd = open(directory.c_str(), O_RDONLY
 #ifdef O_DIRECTORY
                                                          | O_DIRECTORY
@@ -166,7 +167,8 @@ void FileDiskManager::Open() {
         file_descriptor_ = _open(file_name_.c_str(), _O_RDWR | _O_BINARY);
     }
 #else
-    // lgtm [cpp/path-injection] Trusted DB_PATH config, not HTTP input.
+    // Trusted DB_PATH config, not HTTP input.
+    // lgtm [cpp/path-injection]
     file_descriptor_ = open(file_name_.c_str(),
                             O_RDWR | O_CREAT | O_EXCL
 #ifdef O_CLOEXEC
@@ -177,7 +179,8 @@ void FileDiskManager::Open() {
     if (file_descriptor_ >= 0) {
         created = true;
     } else if (errno == EEXIST) {
-        // lgtm [cpp/path-injection] Trusted DB_PATH config, not HTTP input.
+        // Trusted DB_PATH config, not HTTP input.
+        // lgtm [cpp/path-injection]
         file_descriptor_ = open(file_name_.c_str(), O_RDWR
 #ifdef O_CLOEXEC
                                                         | O_CLOEXEC
