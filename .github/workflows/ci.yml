@@ -401,10 +401,12 @@ jobs:
           python3 -m pip install --require-hashes -r tests/api/requirements.txt
           schemathesis run docs/openapi.yaml \
             --base-url http://127.0.0.1:18082 \
+            --header 'Connection: close' \
             --experimental=openapi-3.1 \
             --rate-limit 4/s \
             --checks all \
             --hypothesis-max-examples 100 \
+            --debug-output-file schemathesis-debug.jsonl \
             --workers 1
       - name: Show test service logs after failure
         if: failure()
@@ -437,6 +439,7 @@ jobs:
           path: |
             report_html.html
             report_json.json
+            schemathesis-debug.jsonl
             zap-baseline.json
             zap-api.json
           if-no-files-found: ignore
