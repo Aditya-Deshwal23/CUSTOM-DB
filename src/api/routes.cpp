@@ -646,6 +646,9 @@ void ApiServer::Impl::RegisterRoutes() {
     CROW_ROUTE(app, "/api/v1/query")
         .methods(crow::HTTPMethod::POST)(
             [this](const crow::request& request) { return HandleQuery(*this, request, false); });
+    CROW_ROUTE(app, "/api/v1/batch")
+        .methods(crow::HTTPMethod::POST)(
+            [this](const crow::request& request) { return HandleBatch(*this, request); });
     CROW_ROUTE(app, "/api/query")
         .methods(crow::HTTPMethod::POST)(
             [this](const crow::request& request) { return HandleQuery(*this, request, true); });

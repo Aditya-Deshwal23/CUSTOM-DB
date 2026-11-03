@@ -44,8 +44,8 @@ runtime service or frontend build.
   coordinates loading and replacement, and performs disk I/O outside its page
   table mutex. `clock` and `lruk` replacement policies are selectable.
 - `TableHeap` stores schema-encoded tuples in slotted pages. The catalog and
-  each index root are persisted in the database; the SQL catalog currently
-  fits on one page.
+  each index root are persisted in the database; larger SQL catalogs chain
+  multiple pages and upgrade legacy single-page catalogs transactionally.
 - `BPlusTree` handles point/range access for supported key types. SQL plans
   use sequential scans where index ordering or ranges are unsupported.
 - `Executor` is the public statement boundary. `SqlEngine` in

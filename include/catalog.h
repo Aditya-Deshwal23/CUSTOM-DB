@@ -51,6 +51,7 @@ class Catalog {
     std::shared_ptr<BufferPoolManager> buffer_pool_;
     page_id_t owner_meta_page_id_;
     page_id_t catalog_page_id_{INVALID_PAGE_ID};
+    std::vector<page_id_t> catalog_page_ids_;
     std::vector<std::unique_ptr<CatalogTable>> tables_;
 };
 

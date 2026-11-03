@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "storage/storage_format.h"
@@ -12,9 +13,22 @@
 namespace relational_db {
 namespace {
 
-constexpr uint32_t kCatalogVersion = 2;
+constexpr uint32_t kCatalogVersion = 3;
+constexpr uint32_t kLegacyCatalogVersion = 2;
 constexpr size_t kCatalogPointerOffset = sizeof(bpt_detail::IndexMetaLayout) + sizeof(page_id_t);
 constexpr size_t kCatalogHeaderSize = 6;
+constexpr size_t kCatalogVersionOffset = 0;
+constexpr size_t kCatalogNextPageOffset = sizeof(uint32_t);
+constexpr size_t kCatalogTableCountOffset = 2U * sizeof(uint32_t);
+constexpr size_t kCatalogPayloadSizeOffset = 3U * sizeof(uint32_t);
+constexpr size_t kCatalogPageHeaderSize = 4U * sizeof(uint32_t);
+static_assert(kCatalogHeaderSize == sizeof(uint32_t) + sizeof(uint16_t));
+static_assert(kCatalogVersionOffset == 0U);
+static_assert(kCatalogNextPageOffset == sizeof(uint32_t));
+static_assert(kCatalogTableCountOffset == 2U * sizeof(uint32_t));
+static_assert(kCatalogPayloadSizeOffset == 3U * sizeof(uint32_t));
+static_assert(kCatalogPageHeaderSize == 16U);
+static_assert(kCatalogPageHeaderSize < PAGE_DATA_SIZE);
 using BytePage = std::array<char, PAGE_DATA_SIZE>;
 
 class Writer {
@@ -39,6 +53,10 @@ class Writer {
             throw DbError(ErrorCode::INVALID_ARGUMENT, "Catalog string is too long");
         }
         U16(static_cast<uint16_t>(value.size()));
+        bytes_.insert(bytes_.end(), value.begin(), value.end());
+    }
+
+    void Raw(const std::vector<uint8_t>& value) {
         bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
 
@@ -274,6 +292,7 @@ void Catalog::Reload() {
         root = INVALID_PAGE_ID;
     }
     catalog_page_id_ = root;
+    catalog_page_ids_.clear();
     tables_.clear();
     if (catalog_page_id_ != INVALID_PAGE_ID) {
         Load(catalog_page_id_);
@@ -281,24 +300,99 @@ void Catalog::Reload() {
 }
 
 void Catalog::Load(page_id_t catalog_page_id) {
-    ReadPageGuard guard = buffer_pool_->FetchRead(catalog_page_id);
-    if (guard.GetPageType() != PageType::CATALOG) {
-        throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog root has the wrong page type",
-                      catalog_page_id);
+    std::vector<uint8_t> catalog_bytes;
+    std::vector<uint8_t> first_page(PAGE_DATA_SIZE);
+    {
+        ReadPageGuard guard = buffer_pool_->FetchRead(catalog_page_id);
+        if (guard.GetPageType() != PageType::CATALOG) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog root has the wrong page type",
+                          catalog_page_id);
+        }
+        const auto* body = guard.As<BytePage>();
+        std::memcpy(first_page.data(), body->data(), body->size());
     }
-    const auto* body = guard.As<BytePage>();
-    std::vector<uint8_t> catalog_bytes(body->size());
-    std::memcpy(catalog_bytes.data(), body->data(), body->size());
-    guard.Drop();
-    Reader reader(catalog_bytes.data(), catalog_bytes.size());
-    const uint32_t version = reader.U32();
+
+    Reader first_header(first_page.data(), first_page.size());
+    const uint32_t root_version = first_header.U32();
+    uint32_t version = root_version;
+    uint32_t table_count = 0;
+    size_t records_offset = 0;
+    if (root_version == kCatalogVersion) {
+        std::unordered_set<page_id_t> visited;
+        page_id_t current_page_id = catalog_page_id;
+        while (current_page_id != INVALID_PAGE_ID) {
+            if (current_page_id <= 0 ||
+                static_cast<uint64_t>(current_page_id) >= buffer_pool_->PageCount() ||
+                !visited.insert(current_page_id).second) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog page chain is invalid",
+                              current_page_id);
+            }
+            ReadPageGuard guard = buffer_pool_->FetchRead(current_page_id);
+            if (guard.GetPageType() != PageType::CATALOG) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog chain page has the wrong type",
+                              current_page_id);
+            }
+            const auto* body = guard.As<BytePage>();
+            Reader page_reader(reinterpret_cast<const uint8_t*>(body->data()), body->size());
+            if (page_reader.U32() != kCatalogVersion) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog chain version is inconsistent",
+                              current_page_id);
+            }
+            const uint32_t next_page_value = page_reader.U32();
+            const uint32_t page_table_count = page_reader.U32();
+            const uint32_t payload_size = page_reader.U32();
+            if (payload_size > body->size() - kCatalogPageHeaderSize) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog page payload length is invalid",
+                              current_page_id);
+            }
+            if (page_table_count > std::numeric_limits<uint32_t>::max() - table_count) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog table count overflows",
+                              current_page_id);
+            }
+            table_count += page_table_count;
+            catalog_page_ids_.push_back(current_page_id);
+            const auto* payload = reinterpret_cast<const uint8_t*>(body->data()) +
+                                  kCatalogPageHeaderSize;
+            catalog_bytes.insert(catalog_bytes.end(), payload, payload + payload_size);
+            guard.Drop();
+
+            if (next_page_value == UINT32_MAX) {
+                current_page_id = INVALID_PAGE_ID;
+            } else if (next_page_value >
+                       static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog next-page ID is out of range",
+                              current_page_id);
+            } else {
+                current_page_id = static_cast<page_id_t>(next_page_value);
+            }
+        }
+    } else {
+        if (root_version == 0U || root_version > kCatalogVersion) {
+            throw DbError(ErrorCode::UNSUPPORTED_VERSION, "Unsupported catalog version",
+                          catalog_page_id);
+        }
+        catalog_page_ids_.push_back(catalog_page_id);
+        catalog_bytes = std::move(first_page);
+        Reader records_header(catalog_bytes.data(), catalog_bytes.size());
+        version = records_header.U32();
+        table_count = records_header.U16();
+        records_offset = records_header.Offset();
+    }
+    if (table_count > catalog_bytes.size() / kCatalogHeaderSize) {
+        throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog table count is invalid", catalog_page_id);
+    }
+
+    const uint8_t* records_data = catalog_bytes.data();
+    if (records_offset != 0U) {
+        records_data += records_offset;
+    }
+    Reader reader(records_data, catalog_bytes.size() - records_offset);
     if (version == 0U || version > kCatalogVersion) {
         throw DbError(ErrorCode::UNSUPPORTED_VERSION, "Unsupported catalog version",
                       catalog_page_id);
     }
-    const uint16_t table_count = reader.U16();
     tables_.reserve(table_count);
-    for (uint16_t table_index = 0; table_index < table_count; ++table_index) {
+    for (uint32_t table_index = 0; table_index < table_count; ++table_index) {
         auto table = std::make_unique<CatalogTable>();
         table->name = reader.String();
         const page_id_t heap_page_id = static_cast<page_id_t>(reader.U32());
@@ -345,74 +439,136 @@ void Catalog::Load(page_id_t catalog_page_id) {
         }
         tables_.push_back(std::move(table));
     }
-    if (reader.Offset() > catalog_bytes.size() ||
-        table_count > catalog_bytes.size() / kCatalogHeaderSize) {
-        throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog table count is invalid", catalog_page_id);
-    }
 }
 
 void Catalog::Persist() {
-    Writer writer;
-    writer.U32(kCatalogVersion);
-    if (tables_.size() > std::numeric_limits<uint16_t>::max()) {
+    if (tables_.size() > std::numeric_limits<uint32_t>::max()) {
         throw DbError(ErrorCode::TUPLE_TOO_LARGE, "Too many tables in catalog");
     }
-    writer.U16(static_cast<uint16_t>(tables_.size()));
+    std::vector<std::vector<uint8_t>> table_records;
+    table_records.reserve(tables_.size());
     for (const auto& table : tables_) {
-        writer.String(table->name);
-        writer.U32(static_cast<uint32_t>(table->heap->HeaderPageId()));
         if (table->schema.columns.size() > std::numeric_limits<uint16_t>::max() ||
             table->indexes.size() > std::numeric_limits<uint16_t>::max()) {
             throw DbError(ErrorCode::TUPLE_TOO_LARGE, "Catalog table metadata is too large");
         }
-        writer.U16(static_cast<uint16_t>(table->schema.columns.size()));
-        writer.U16(table->schema.primary_key ? static_cast<uint16_t>(*table->schema.primary_key)
+        Writer record;
+        record.String(table->name);
+        record.U32(static_cast<uint32_t>(table->heap->HeaderPageId()));
+        record.U16(static_cast<uint16_t>(table->schema.columns.size()));
+        record.U16(table->schema.primary_key ? static_cast<uint16_t>(*table->schema.primary_key)
                                              : UINT16_MAX);
         for (size_t column_index = 0; column_index < table->schema.columns.size(); ++column_index) {
             const Column& column = table->schema.columns[column_index];
-            writer.String(column.name);
-            writer.U8(static_cast<uint8_t>(column.type));
-            writer.U16(column.varchar_length);
-            writer.U8(table->not_null[column_index] ? 1U : 0U);
-            writer.U8(column.references ? 1U : 0U);
+            record.String(column.name);
+            record.U8(static_cast<uint8_t>(column.type));
+            record.U16(column.varchar_length);
+            record.U8(table->not_null[column_index] ? 1U : 0U);
+            record.U8(column.references ? 1U : 0U);
             if (column.references) {
-                writer.String(column.references->table);
-                writer.String(column.references->column);
+                record.String(column.references->table);
+                record.String(column.references->column);
             }
         }
-        writer.U16(static_cast<uint16_t>(table->indexes.size()));
+        record.U16(static_cast<uint16_t>(table->indexes.size()));
         for (const CatalogIndex& index : table->indexes) {
-            WriteIndexMeta(writer, index);
+            WriteIndexMeta(record, index);
+        }
+        table_records.push_back(record.Bytes());
+    }
+
+    Writer legacy_writer;
+    if (tables_.size() <= std::numeric_limits<uint16_t>::max()) {
+        legacy_writer.U32(kLegacyCatalogVersion);
+        legacy_writer.U16(static_cast<uint16_t>(tables_.size()));
+        for (const auto& record : table_records) {
+            legacy_writer.Raw(record);
         }
     }
-    if (writer.Bytes().size() > PAGE_DATA_SIZE) {
-        throw DbError(ErrorCode::TUPLE_TOO_LARGE, "Catalog metadata exceeds one page");
+    const bool use_legacy_page =
+        tables_.size() <= std::numeric_limits<uint16_t>::max() &&
+        legacy_writer.Bytes().size() <= PAGE_DATA_SIZE;
+    struct CatalogPayloadPage {
+        std::vector<uint8_t> bytes;
+        uint32_t table_count{0};
+    };
+    std::vector<CatalogPayloadPage> payload_pages;
+    if (!use_legacy_page) {
+        const size_t page_payload_size = PAGE_DATA_SIZE - kCatalogPageHeaderSize;
+        for (const auto& record : table_records) {
+            if (record.size() > page_payload_size) {
+                throw DbError(ErrorCode::TUPLE_TOO_LARGE,
+                              "A table's catalog record exceeds one catalog page");
+            }
+            if (payload_pages.empty() ||
+                payload_pages.back().bytes.size() + record.size() > page_payload_size) {
+                payload_pages.emplace_back();
+            }
+            CatalogPayloadPage& page = payload_pages.back();
+            page.bytes.insert(page.bytes.end(), record.begin(), record.end());
+            ++page.table_count;
+        }
+        if (payload_pages.empty()) {
+            payload_pages.emplace_back();
+        }
     }
+    const size_t page_count = use_legacy_page ? 1U : payload_pages.size();
 
-    if (catalog_page_id_ == INVALID_PAGE_ID) {
+    std::vector<page_id_t> page_ids = catalog_page_ids_;
+    while (page_ids.size() < page_count) {
         WritePageGuard guard = buffer_pool_->NewPageGuarded();
-        catalog_page_id_ = guard.GetPageId();
+        page_ids.push_back(guard.GetPageId());
         guard.SetPageType(PageType::CATALOG);
-        auto* body = guard.AsMut<BytePage>();
-        body->fill(0);
-        std::memcpy(body->data(), writer.Bytes().data(), writer.Bytes().size());
-        guard.Drop();
-
+    }
+    if (catalog_page_id_ == INVALID_PAGE_ID) {
         WritePageGuard owner_guard = buffer_pool_->FetchWrite(owner_meta_page_id_);
         auto* owner_body = owner_guard.AsMut<BytePage>();
         bpt_detail::WritePageId(
-            reinterpret_cast<uint8_t*>(owner_body->data() + kCatalogPointerOffset),
-            catalog_page_id_);
-    } else {
-        WritePageGuard guard = buffer_pool_->FetchWrite(catalog_page_id_);
-        if (guard.GetPageType() != PageType::CATALOG) {
-            throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog root has the wrong page type",
-                          catalog_page_id_);
-        }
+            reinterpret_cast<uint8_t*>(owner_body->data() + kCatalogPointerOffset), page_ids[0]);
+    }
+
+    if (use_legacy_page) {
+        WritePageGuard guard = buffer_pool_->FetchWrite(page_ids[0]);
+        guard.SetPageType(PageType::CATALOG);
         auto* body = guard.AsMut<BytePage>();
         body->fill(0);
-        std::memcpy(body->data(), writer.Bytes().data(), writer.Bytes().size());
+        std::memcpy(body->data(), legacy_writer.Bytes().data(), legacy_writer.Bytes().size());
+    } else {
+        for (size_t page_index = 0; page_index < page_count; ++page_index) {
+            const CatalogPayloadPage& payload = payload_pages[page_index];
+            const page_id_t next_page_id =
+                page_index + 1U < page_count ? page_ids[page_index + 1U] : INVALID_PAGE_ID;
+            WritePageGuard guard = buffer_pool_->FetchWrite(page_ids[page_index]);
+            if (page_index < catalog_page_ids_.size() &&
+                guard.GetPageType() != PageType::CATALOG) {
+                throw DbError(ErrorCode::PAGE_CORRUPT, "Catalog chain page has the wrong type",
+                              page_ids[page_index]);
+            }
+            guard.SetPageType(PageType::CATALOG);
+            auto* body = guard.AsMut<BytePage>();
+            body->fill(0);
+            Writer page_header;
+            page_header.U32(kCatalogVersion);
+            page_header.U32(next_page_id == INVALID_PAGE_ID ? UINT32_MAX
+                                                            : static_cast<uint32_t>(next_page_id));
+            page_header.U32(payload.table_count);
+            page_header.U32(static_cast<uint32_t>(payload.bytes.size()));
+            std::memcpy(body->data(), page_header.Bytes().data(), page_header.Bytes().size());
+            if (!payload.bytes.empty()) {
+                std::memcpy(body->data() + kCatalogPageHeaderSize, payload.bytes.data(),
+                            payload.bytes.size());
+            }
+        }
     }
+    for (size_t page_index = page_count; page_index < page_ids.size(); ++page_index) {
+        if (!buffer_pool_->DeletePage(page_ids[page_index])) {
+            throw DbError(ErrorCode::PAGE_CORRUPT, "Unable to retire unused catalog page",
+                          page_ids[page_index]);
+        }
+    }
+    page_ids.resize(page_count);
+    catalog_page_id_ = page_ids.front();
+    catalog_page_ids_ = std::move(page_ids);
 }
 
 IndexKey16 IndexPrefix(const Value& value) {

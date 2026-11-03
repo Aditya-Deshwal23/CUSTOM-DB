@@ -83,6 +83,40 @@ class TemporaryPath {
     std::filesystem::path path_;
 };
 
+uint32_t CatalogVersion(BufferPoolManager& buffer_pool) {
+    relational_db::page_id_t owner_page_id = relational_db::INVALID_PAGE_ID;
+    {
+        auto header = buffer_pool.FetchRead(0);
+        const auto* body = header.As<std::array<char, relational_db::PAGE_DATA_SIZE>>();
+        owner_page_id = relational_db::bpt_detail::ReadPageId(
+            reinterpret_cast<const uint8_t*>(body->data() + 28U));
+    }
+    relational_db::page_id_t catalog_page_id = relational_db::INVALID_PAGE_ID;
+    {
+        auto owner = buffer_pool.FetchRead(owner_page_id);
+        const auto* body = owner.As<std::array<char, relational_db::PAGE_DATA_SIZE>>();
+        catalog_page_id = relational_db::bpt_detail::ReadPageId(
+            reinterpret_cast<const uint8_t*>(body->data() + 12U));
+    }
+    auto catalog = buffer_pool.FetchRead(catalog_page_id);
+    const auto* body = catalog.As<std::array<char, relational_db::PAGE_DATA_SIZE>>();
+    const auto* bytes = reinterpret_cast<const uint8_t*>(body->data());
+    return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8U) |
+           (static_cast<uint32_t>(bytes[2]) << 16U) | (static_cast<uint32_t>(bytes[3]) << 24U);
+}
+
+std::string CatalogTestTableSql(const std::string& table_name) {
+    std::string statement = "CREATE TABLE " + table_name + " (";
+    for (size_t column_index = 0; column_index < 10U; ++column_index) {
+        if (column_index != 0U) {
+            statement += ", ";
+        }
+        statement += "column_" + std::to_string(column_index) + " INT";
+    }
+    statement += ")";
+    return statement;
+}
+
 std::shared_ptr<BufferPoolManager> MakeBufferPool(const std::string& path) {
     return std::make_shared<BufferPoolManager>(50, std::make_shared<DiskManager>(path));
 }
@@ -347,6 +381,134 @@ TEST(WalTest, EveryCommittedStatementIsDurableBeforeReturning) {
         Executor recovered_executor(recovered_bpm, recovered_wal);
         EXPECT_EQ(recovered_executor.ExecuteQuery("SELECT 8"), "Result: 80");
     }
+}
+
+TEST(WalTest, FirstMultiPageCatalogUpgradeRecoversAtEveryCommitFailpoint) {
+#if defined(_WIN32)
+    GTEST_SKIP() << "Catalog upgrade crash test requires POSIX process semantics.";
+#else
+    struct FailpointCase {
+        const char* name;
+        bool must_commit;
+    };
+    const std::array<FailpointCase, 4> failpoints{{
+        {"page_image_before", false},
+        {"page_image_after", false},
+        {"commit_after", false},
+        {"wal_fsync_after", true},
+    }};
+    for (const FailpointCase& failpoint : failpoints) {
+        TemporaryPath path;
+        {
+            auto disk = std::make_shared<DiskManager>(path.String());
+            WriteAheadLog wal(path.String());
+            wal.Recover(*disk);
+            auto buffer_pool = std::make_shared<BufferPoolManager>(64, disk);
+            Executor executor(buffer_pool, wal);
+            for (size_t table_index = 0; table_index < 24U; ++table_index) {
+                executor.ExecuteQuery(CatalogTestTableSql("many_" + std::to_string(table_index)));
+            }
+            ASSERT_EQ(CatalogVersion(*buffer_pool), 2U);
+        }
+
+        const pid_t child = fork();
+        ASSERT_GE(child, 0);
+        if (child == 0) {
+            if (setenv("RELDB_FAILPOINT", (std::string(failpoint.name) + ":kill").c_str(), 1) !=
+                0) {
+                _exit(20);
+            }
+            try {
+                auto disk = std::make_shared<DiskManager>(path.String(), true);
+                WriteAheadLog wal(path.String());
+                wal.Recover(*disk);
+                auto buffer_pool = std::make_shared<BufferPoolManager>(64, disk);
+                Executor executor(buffer_pool, wal);
+                executor.ExecuteQuery(CatalogTestTableSql("many_24"));
+            } catch (const std::exception&) {
+                _exit(21);
+            }
+            _exit(22);
+        }
+
+        int child_status = 0;
+        ASSERT_EQ(waitpid(child, &child_status, 0), child);
+        ASSERT_TRUE(WIFSIGNALED(child_status));
+        ASSERT_EQ(WTERMSIG(child_status), SIGKILL);
+
+        auto disk = std::make_shared<DiskManager>(path.String(), true);
+        WriteAheadLog wal(path.String());
+        wal.Recover(*disk);
+        auto buffer_pool = std::make_shared<BufferPoolManager>(64, disk);
+        Executor executor(buffer_pool, wal);
+        const std::string tables = executor.ExecuteQuery("SHOW TABLES");
+        const bool upgraded_table_exists = tables.find("many_24") != std::string::npos;
+        if (failpoint.must_commit) {
+            EXPECT_TRUE(upgraded_table_exists);
+        } else if (std::string(failpoint.name) != "commit_after") {
+            EXPECT_FALSE(upgraded_table_exists);
+        }
+        EXPECT_FALSE(executor.IntegrityCheck());
+        EXPECT_EQ(CatalogVersion(*buffer_pool), upgraded_table_exists ? 3U : 2U);
+    }
+#endif
+}
+
+TEST(WalTest, AtomicBatchCrashRecoveryNeverExposesAPartialBatch) {
+#if !defined(__linux__)
+    GTEST_SKIP() << "Batch crash test requires Linux process semantics.";
+#else
+    const std::array<const char*, 4> failpoints{
+        "page_image_before", "page_image_after", "commit_after", "wal_fsync_after"};
+    for (const char* failpoint : failpoints) {
+        TemporaryPath path;
+        {
+            auto disk = std::make_shared<DiskManager>(path.String());
+            WriteAheadLog wal(path.String());
+            wal.Recover(*disk);
+            auto buffer_pool = std::make_shared<BufferPoolManager>(64, disk);
+            Executor executor(buffer_pool, wal);
+            executor.ExecuteQuery("CREATE TABLE batch_crash_rows (id INT PRIMARY KEY)");
+        }
+
+        const pid_t child = fork();
+        ASSERT_GE(child, 0);
+        if (child == 0) {
+            if (setenv("RELDB_FAILPOINT", (std::string(failpoint) + ":kill").c_str(), 1) != 0) {
+                _exit(20);
+            }
+            try {
+                auto disk = std::make_shared<DiskManager>(path.String(), true);
+                WriteAheadLog wal(path.String());
+                wal.Recover(*disk);
+                auto buffer_pool = std::make_shared<BufferPoolManager>(64, disk);
+                Executor executor(buffer_pool, wal);
+                size_t failed_statement_index = 0;
+                (void)executor.ExecuteBatch(
+                    {"INSERT INTO batch_crash_rows VALUES (1)",
+                     "INSERT INTO batch_crash_rows VALUES (2)"},
+                    std::chrono::seconds(2), 100, failed_statement_index);
+            } catch (const std::exception&) {
+                _exit(21);
+            }
+            _exit(22);
+        }
+
+        int child_status = 0;
+        ASSERT_EQ(waitpid(child, &child_status, 0), child);
+        ASSERT_TRUE(WIFSIGNALED(child_status));
+        ASSERT_EQ(WTERMSIG(child_status), SIGKILL);
+
+        auto disk = std::make_shared<DiskManager>(path.String(), true);
+        WriteAheadLog wal(path.String());
+        wal.Recover(*disk);
+        auto buffer_pool = std::make_shared<BufferPoolManager>(64, disk);
+        Executor executor(buffer_pool, wal);
+        const std::string count = executor.ExecuteQuery("SELECT COUNT(*) FROM batch_crash_rows");
+        EXPECT_TRUE(count == "COUNT(*)\n0" || count == "COUNT(*)\n2") << failpoint << ": " << count;
+        EXPECT_FALSE(executor.IntegrityCheck());
+    }
+#endif
 }
 
 TEST(WalTest, NormalModeSyncThreadTsanClean) {

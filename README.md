@@ -4,7 +4,7 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Coverage report](https://img.shields.io/badge/coverage-gcovr%20in%20CI-blue)](https://github.com/Aditya-Deshwal23/CUSTOM-DB/actions/workflows/ci.yml)
 
-CUSTOM-DB is a small C++17 relational storage engine presented as one self-contained service: Crow serves a versioned SQL API and a vanilla HTML/CSS/JavaScript dashboard, while a page-oriented buffer pool, B+ tree, single-page SQL catalog, and checksummed redo WAL provide an inspectable persistence path from statement to disk. It is an engineering project for learning and demonstration—not a general-purpose or production database—and its measured trade-offs and unsupported features are documented below.
+CUSTOM-DB is a small C++17 relational storage engine presented as one self-contained service: Crow serves a versioned SQL API and a vanilla HTML/CSS/JavaScript dashboard, while a page-oriented buffer pool, B+ tree, multi-page SQL catalog, and checksummed redo WAL provide an inspectable persistence path from statement to disk. It is an engineering project for learning and demonstration—not a general-purpose or production database—and its measured trade-offs and unsupported features are documented below.
 
 ## Live demo
 
@@ -44,7 +44,7 @@ CI runs the same container workflow through [`scripts/quickstart.sh`](scripts/qu
 | SQL | ✓ [SQL execution tests](tests/sql_execution_test.cpp), [parser tests](tests/sql_parser_test.cpp) | Deliberate SQL subset; see [reference](docs/SQL_REFERENCE.md) | Joins; general SQL; multi-statement transactions |
 | Recovery | ✓ [WAL tests](tests/regression/known_bugs_test.cpp), [Linux crash workflow](.github/workflows/ci.yml) | Full-page after-image WAL can amplify writes | MVCC; distributed recovery |
 | Concurrency | ✓ [writer fairness test](tests/sql_execution_test.cpp), [TSan stress](.github/workflows/ci.yml) | Multiple readers, one writer, statement-level serialization | Concurrent writers; snapshot isolation |
-| Planner and execution | ✓ [plan/execution tests](tests/sql_execution_test.cpp), [SQL benchmarks](docs/BENCHMARKS.md) | Sort and grouping use memory; one-page catalog | Cost-based optimizer; spill-to-disk operators |
+| Planner and execution | ✓ [plan/execution tests](tests/sql_execution_test.cpp), [SQL benchmarks](docs/BENCHMARKS.md) | Sort and grouping use memory | Cost-based optimizer; spill-to-disk operators |
 | HTTP service | ✓ [API contract tests](tests/api/test_api.py), [OpenAPI](docs/openapi.yaml) | One service; bounded API and statement settings | Replication protocol; clustering |
 | Dashboard | ✓ [browser tests](tests/dashboard/test_dashboard.py) | Same-origin, live data; replay is explicitly labeled | Offline editing or fake live telemetry |
 | Packaging | ✓ [container CI](.github/workflows/ci.yml), [crash demo](scripts/demo_crash.sh) | Render Free storage is ephemeral | Persistent storage on Render Free |

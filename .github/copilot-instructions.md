@@ -5,3 +5,5 @@
 - Concurrency: no I/O under a global mutex; lock order documented in docs/CONCURRENCY.md; every concurrent component gets a TSan stress test that prints its seed.
 - Portability: Linux is the reference; keep MinGW/UCRT64 compiling (POSIX-only code behind #ifdef _WIN32 fallbacks). Crash/sanitizer tests run on Linux/WSL2/devcontainer.
 - Done = acceptance criteria met + docs updated + docs/CLAIMS.md updated + CI green.
+- Public-surface rule: every endpoint or parameter taking external input needs (a) hard size/time/row bounds, (b) a rate-limit class, (c) an auth policy, (d) a fuzz or property test, (e) an OpenAPI entry, (f) a metric.
+- Bounded-recursion rule: no unbounded recursion on external input; depth is a configured limit with a test proving it on a 256 KB stack.

@@ -42,10 +42,12 @@ struct ExecutionContext {
 
 struct SqlExecutionResult {
     std::string statement;
+    std::string message;
     std::vector<Column> columns;
     std::vector<std::string> column_names;
     std::vector<Row> rows;
     uint64_t rows_affected{0};
+    bool truncated{false};
     std::string plan;
 };
 
@@ -95,6 +97,10 @@ class SqlExecutionEngine {
         std::chrono::milliseconds timeout = std::chrono::milliseconds(STATEMENT_GATE_TIMEOUT_MS));
     SqlExecutionResult ExecuteResult(std::string_view query, std::chrono::milliseconds timeout,
                                      uint64_t max_rows);
+    std::vector<SqlExecutionResult> ExecuteBatch(const std::vector<std::string>& queries,
+                                                 std::chrono::milliseconds timeout,
+                                                 uint64_t max_rows,
+                                                 size_t& failed_statement_index);
     std::vector<SqlTableMetadata> GetTables();
     std::optional<SqlTableMetadata> GetTable(std::string_view name);
 

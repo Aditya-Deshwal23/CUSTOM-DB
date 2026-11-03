@@ -239,6 +239,20 @@ SqlExecutionResult Executor::ExecuteResult(const std::string& query,
     }
 }
 
+std::vector<SqlExecutionResult> Executor::ExecuteBatch(
+    const std::vector<std::string>& queries, std::chrono::milliseconds timeout, uint64_t max_rows,
+    size_t& failed_statement_index) {
+    try {
+        std::vector<SqlExecutionResult> results =
+            sql_engine_->ExecuteBatch(queries, timeout, max_rows, failed_statement_index);
+        bpm_->AssertNoPinsHeld();
+        return results;
+    } catch (const DbError&) {
+        bpm_->AssertNoPinsHeld();
+        throw;
+    }
+}
+
 std::vector<SqlTableMetadata> Executor::GetTables() {
     return sql_engine_->GetTables();
 }

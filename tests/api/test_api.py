@@ -217,6 +217,64 @@ def test_sql_result_parameters_tables_and_stats(api_server):
     assert storage_stats["recovery"]["ran"] is True
 
 
+def test_atomic_batch_commits_all_or_rolls_back_all(api_server):
+    status, created, _ = request_json(
+        api_server,
+        "/api/v1/batch",
+        {
+            "statements": [
+                {"sql": "CREATE TABLE batch_parent (id INT PRIMARY KEY)"},
+                {"sql": "INSERT INTO batch_parent VALUES ($1)", "params": [1]},
+                {"sql": "SELECT id FROM batch_parent"},
+            ]
+        },
+    )
+    assert status == 200 and created["ok"] is True
+    assert created["committed"] is True and len(created["results"]) == 3
+    assert created["results"][2]["rows"] == [[1]]
+
+    failed_status, failed, _ = request_json(
+        api_server,
+        "/api/v1/batch",
+        {
+            "statements": [
+                {"sql": "INSERT INTO batch_parent VALUES (2)"},
+                {"sql": "INSERT INTO batch_parent VALUES (1)"},
+                {"sql": "INSERT INTO batch_parent VALUES (3)"},
+            ]
+        },
+    )
+    assert failed_status == 409
+    assert failed["error"]["statement_index"] == 1
+    assert post_sql(api_server, "SELECT id FROM batch_parent ORDER BY id")[1]["rows"] == [[1]]
+
+
+def test_atomic_batch_script_controls_and_statement_limit(api_server):
+    status, result, _ = request_json(
+        api_server,
+        "/api/v1/batch",
+        {"script": "BEGIN; CREATE TABLE batch_script (id INT); INSERT INTO batch_script VALUES (4); COMMIT;"},
+    )
+    assert status == 200 and result["committed"] is True
+    assert len(result["results"]) == 2
+    rollback_status, rollback, _ = request_json(
+        api_server,
+        "/api/v1/batch",
+        {
+            "script": "BEGIN; INSERT INTO batch_script VALUES (5); ROLLBACK;"
+        },
+    )
+    assert rollback_status == 200 and rollback["committed"] is False
+    assert post_sql(api_server, "SELECT id FROM batch_script")[1]["rows"] == [[4]]
+
+    too_many_status, too_many, _ = request_json(
+        api_server,
+        "/api/v1/batch",
+        {"statements": [{"sql": "SELECT 1"} for _ in range(51)]},
+    )
+    assert too_many_status == 413 and too_many["error"]["code"] == "BATCH_TOO_LARGE"
+
+
 def test_catalog_foreign_keys_and_stats_histograms(api_server):
     assert post_sql(api_server, "CREATE TABLE demo_users (id INT PRIMARY KEY)")[0] == 200
     assert post_sql(

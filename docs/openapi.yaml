@@ -74,6 +74,43 @@ paths:
           $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
+  /api/v1/batch:
+    post:
+      operationId: executeAtomicBatch
+      description: Executes up to 50 statements on one exclusive gate and one durable WAL transaction. Write batches require X-API-Key when configured and are unavailable in READ_ONLY mode. Multi-request transaction sessions are not supported.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRequest"
+      responses:
+        "200":
+          description: The batch committed atomically, or an explicit script ROLLBACK was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+        "413":
+          $ref: "#/components/responses/ApiError"
+        "422":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "503":
+          $ref: "#/components/responses/ApiError"
+        "507":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
   /api/v1/tables:
     get:
       operationId: listTables
@@ -277,6 +314,85 @@ components:
       oneOf:
         - required: [sql]
         - required: [query]
+    BatchStatement:
+      type: object
+      required: [sql]
+      properties:
+        sql:
+          type: string
+          minLength: 1
+          maxLength: 16384
+        params:
+          type: array
+          items:
+            type: [string, integer, number, boolean, "null"]
+    BatchRequest:
+      type: object
+      oneOf:
+        - required: [statements]
+          properties:
+            statements:
+              type: array
+              minItems: 1
+              maxItems: 50
+              items:
+                $ref: "#/components/schemas/BatchStatement"
+        - required: [script]
+          properties:
+            script:
+              type: string
+              minLength: 1
+              maxLength: 16384
+              description: Must start with BEGIN; and end with COMMIT; or ROLLBACK;.
+    BatchSuccess:
+      type: object
+      required: [ok, committed, results]
+      properties:
+        ok:
+          const: true
+        committed:
+          type: boolean
+        commit:
+          type: object
+          required: [status, durable]
+          properties:
+            status:
+              type: string
+              enum: [committed, rolled_back]
+            durable:
+              type: boolean
+            wal_commit_count:
+              type: integer
+              minimum: 0
+        results:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            required: [statement, message, rows_affected, columns, rows, row_count, truncated]
+            properties:
+              statement:
+                type: string
+              message:
+                type: string
+              rows_affected:
+                type: integer
+                minimum: 0
+              columns:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Column"
+              rows:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: [string, integer, number, boolean, "null"]
+              row_count:
+                type: integer
+                minimum: 0
+              truncated:
+                type: boolean
     Column:
       type: object
       required: [name, type]
@@ -365,5 +481,8 @@ components:
                     minimum: 0
                   hint:
                     type: string
+                  statement_index:
+                    type: integer
+                    minimum: 0
               request_id:
                 type: string

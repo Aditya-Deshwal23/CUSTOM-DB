@@ -175,13 +175,19 @@ the SQL catalog page ID at offset 12. A zero catalog page ID means that an old
 database has no SQL catalog yet. SQL table indexes each have their own
 `INDEX_META` page containing the B+ tree root, height, and key kind.
 
-The SQL catalog is currently one `CATALOG` page. Its body is an explicit
-little-endian encoding, not a native C++ structure:
+The SQL catalog uses explicit little-endian encodings, not native C++
+structures. Versions 1 and 2 are legacy single-page formats and remain
+readable. Small catalogs continue to be written in version 2. When a DDL
+mutation no longer fits in one page, that transaction upgrades the catalog to
+version 3, which stores the serialized table records across a linked chain of
+`CATALOG` pages:
 
 | Field | Encoding |
 |---|---|
-| Version | `u32` (`2`; version `1` remains readable) |
-| Table count | `u16` |
+| Version 1/2 header | `u32` version, `u16` table count |
+| Version 3 page header | `u32` version (`3`), `u32` next page ID (`0xffffffff` at the tail), `u32` table-record count on this page, `u32` payload byte count |
+| Version 3 payload | Complete serialized table records; records are never split between pages |
+| Version 3 table records | Same field layout as version 2 |
 | Table name | `u16` byte length, then UTF-8 bytes |
 | Heap header page ID | `u32` page ID |
 | Column count | `u16` |
@@ -191,8 +197,13 @@ little-endian encoding, not a native C++ structure:
 | Index count | `u16` |
 | Each index | name string, `u16` column ordinal, `u8` unique flag, `u32` metadata page ID |
 
-The complete encoding must fit in the page body (`PAGE_DATA_SIZE`); a catalog
-that exceeds one page fails rather than silently truncating metadata.
+Each version 3 payload length must fit in the page body after its 16-byte
+header. The catalog root remains in the legacy owner `INDEX_META` page, so
+version 1/2 databases upgrade in place on the first DDL that exceeds the
+single-page encoding. The root and all chain-page changes are part of the DDL's
+WAL transaction; recovery therefore observes either the prior legacy catalog
+or the complete new chain. Catalog header widths and offsets are statically
+asserted in `src/catalog.cpp`.
 
 Non-root internal nodes have at least `ceil(max_children / 2) - 1`
 separators. Non-root leaves have at least ten percent of leaf capacity, rounded

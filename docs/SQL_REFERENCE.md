@@ -26,6 +26,14 @@ EXPLAIN ANALYZE SELECT id FROM people WHERE id = 1;
 DROP TABLE people;
 ```
 
+`POST /api/v1/batch` executes up to 50 parameterized statements in a single
+atomic transaction. The JSON form is `{"statements":[{"sql":"...","params":[]}]}`;
+the script form must use `BEGIN; ... COMMIT;` or `BEGIN; ... ROLLBACK;`.
+Statements in the list run in order, and any execution failure rolls back the
+whole batch and reports its zero-based `statement_index`. An explicit script
+`ROLLBACK` accepts no statements and makes no changes. Transaction state does
+not persist across HTTP requests.
+
 Supported types are `INT`, `BIGINT`, `DOUBLE`, `BOOLEAN`, and bounded
 `VARCHAR(n)`. Constraints include primary key, `NOT NULL`, unique indexes, and
 column-level foreign keys to a unique column of the same type.
@@ -55,8 +63,9 @@ limits, and examples are in [openapi.yaml](openapi.yaml).
 
 ## Semantic and resource boundaries
 
-- Each DDL/DML statement is a separate auto-commit WAL transaction. There is
-  no SQL `BEGIN`/`COMMIT` or multi-statement transaction API.
+- Standalone DDL/DML uses one auto-commit WAL transaction. Atomic batches are
+  limited to a single HTTP request; multi-request transaction sessions are
+  out of scope.
 - Joins, table-level/composite foreign keys, composite SQL indexes, and general
   transaction isolation are not implemented.
 - `VARCHAR` is limited to 255 bytes; the encoded tuple must fit in one heap

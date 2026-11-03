@@ -22,18 +22,25 @@ available.
 - One auto-commit WAL transaction per write statement. UPDATE and DELETE
   identify target rows before modifying them, and all indexes are maintained
   when rows change or move.
+- `POST /api/v1/batch` acquires one exclusive statement gate and commits the
+  ordered statements in one WAL transaction. A failure reports the
+  zero-based statement index and rolls back earlier work. `BEGIN; ... COMMIT;`
+  and explicit script `ROLLBACK;` are supported only within one request;
+  multi-request sessions are not supported.
 
 `EXPLAIN` displays the planned operator tree without executing it.
 `EXPLAIN ANALYZE` executes the SELECT and reports actual rows, inclusive
 operator wall time, buffer-pool page-fetch/miss deltas, and the selected access
 path. It is not a trace of dashboard simulation behavior.
 
-The catalog is currently serialized into one page. Catalog format v2 persists
-foreign-key targets and can read v1 catalogs. Invalid child inserts, updates or
-deletes of referenced keys, and drops of referenced tables are rejected.
+Small catalogs use the legacy single-page format. Catalog format v3 chains
+pages when a DDL mutation outgrows that encoding; versions 1 and 2 remain
+readable and upgrade transactionally on that first oversized DDL. Invalid child
+inserts, updates or deletes of referenced keys, and drops of referenced tables
+are rejected.
 Table-level/composite foreign keys, composite indexes/primary keys,
-multi-statement transactions, SQL joins, and general transaction isolation are
-not implemented. VARCHAR equality indexes use a
+multi-request transaction sessions, SQL joins, and general transaction
+isolation are not implemented. VARCHAR equality indexes use a
 64-bit hash prefix and verify candidate rows; VARCHAR index range scans and
 index ordering are not supported. The HTTP API returns typed column and row
 arrays; the legacy executor string interface remains tab/newline text.

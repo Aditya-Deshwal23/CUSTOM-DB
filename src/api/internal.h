@@ -85,6 +85,7 @@ void ApplyResponseHeaders(crow::response& response);
 std::string BindParameters(const std::string& sql, const crow::json::rvalue& params);
 std::string SqlStatementName(SqlStatementKind kind);
 bool ApiKeyMatches(const std::string& expected, const std::string& supplied);
+crow::response HandleBatch(ApiServer::Impl& server, const crow::request& request);
 
 }  // namespace relational_db
 

@@ -310,6 +310,105 @@ TEST(SqlExecutionTest, CatalogAndRowsSurviveRestart) {
     }
 }
 
+TEST(SqlExecutionTest, VersionOnePointZeroDatabaseFixtureOpensUpgradesAndRestarts) {
+    TemporaryDatabase database;
+    const std::filesystem::path fixture_path =
+        std::filesystem::path(RELDB_SOURCE_DIR) / "tests/fixtures/v1_0.db";
+    ASSERT_TRUE(std::filesystem::exists(fixture_path));
+    std::filesystem::copy_file(fixture_path, database.Path());
+
+    {
+        SqlFixture fixture(database.Path());
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT label FROM legacy_fixture WHERE id = 7"),
+                  "label\n'from-v1.0'");
+        fixture.executor->ExecuteQuery(
+            "CREATE TABLE added_after_upgrade (id INT PRIMARY KEY, note VARCHAR(32))");
+    }
+
+    {
+        SqlFixture fixture(database.Path());
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT label FROM legacy_fixture WHERE id = 7"),
+                  "label\n'from-v1.0'");
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT COUNT(*) FROM added_after_upgrade"),
+                  "COUNT(*)\n0");
+    }
+}
+
+TEST(SqlExecutionTest, AtomicBatchRollsBackEarlierStatementsOnFailure) {
+    TemporaryDatabase database;
+    SqlFixture fixture(database.Path());
+    fixture.executor->ExecuteQuery("CREATE TABLE batch_rows (id INT PRIMARY KEY)");
+    fixture.executor->ExecuteQuery("INSERT INTO batch_rows VALUES (1)");
+
+    const std::vector<std::string> statements{
+        "INSERT INTO batch_rows VALUES (2)",
+        "INSERT INTO batch_rows VALUES (1)",
+        "INSERT INTO batch_rows VALUES (3)",
+    };
+    size_t failed_statement_index = 0;
+    EXPECT_THROW(fixture.executor->ExecuteBatch(statements, std::chrono::seconds(2), 100,
+                                                failed_statement_index),
+                 DbError);
+    EXPECT_EQ(failed_statement_index, 1U);
+    EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT id FROM batch_rows ORDER BY id"),
+              "id\n1");
+    fixture.bpm->AssertNoPinsHeld();
+}
+
+TEST(SqlExecutionTest, CatalogSupportsHundredsOfTablesAcrossRestartAndDrop) {
+    TemporaryDatabase database;
+    {
+        SqlFixture fixture(database.Path());
+        fixture.executor->ExecuteQuery("CREATE TABLE fk_parent (id INT PRIMARY KEY)");
+        fixture.executor->ExecuteQuery(
+            "CREATE TABLE fk_child (id INT PRIMARY KEY, parent_id INT REFERENCES fk_parent(id))");
+        fixture.executor->ExecuteQuery("INSERT INTO fk_parent VALUES (1)");
+        fixture.executor->ExecuteQuery("INSERT INTO fk_child VALUES (1, 1)");
+        for (size_t table_index = 0; table_index < 500U; ++table_index) {
+            std::string statement = "CREATE TABLE many_" + std::to_string(table_index) + " (";
+            for (size_t column_index = 0; column_index < 10U; ++column_index) {
+                if (column_index != 0U) {
+                    statement += ", ";
+                }
+                statement += "column_" + std::to_string(column_index) + " INT";
+            }
+            statement += ")";
+            fixture.executor->ExecuteQuery(statement);
+        }
+    }
+
+    {
+        const auto startup_started = std::chrono::steady_clock::now();
+        SqlFixture fixture(database.Path());
+        const auto startup_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startup_started);
+        std::cout << "[catalog] startup_ms=" << startup_elapsed.count() << '\n';
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT COUNT(*) FROM many_499"),
+                  "COUNT(*)\n0");
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT parent_id FROM fk_child"),
+                  "parent_id\n1");
+        EXPECT_THROW(fixture.executor->ExecuteQuery("DROP TABLE fk_parent"), DbError);
+        for (size_t table_index = 0; table_index < 250U; ++table_index) {
+            fixture.executor->ExecuteQuery("DROP TABLE many_" + std::to_string(table_index));
+        }
+        const std::string tables = fixture.executor->ExecuteQuery("SHOW TABLES");
+        EXPECT_EQ(tables.find("many_0"), std::string::npos);
+        EXPECT_NE(tables.find("many_499"), std::string::npos);
+        EXPECT_THROW(fixture.executor->ExecuteQuery("SELECT * FROM many_0"), DbError);
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT COUNT(*) FROM many_499"),
+                  "COUNT(*)\n0");
+    }
+
+    {
+        SqlFixture fixture(database.Path());
+        EXPECT_THROW(fixture.executor->ExecuteQuery("SELECT * FROM many_0"), DbError);
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT COUNT(*) FROM many_499"),
+                  "COUNT(*)\n0");
+        EXPECT_EQ(fixture.executor->ExecuteQuery("SELECT parent_id FROM fk_child"),
+                  "parent_id\n1");
+    }
+}
+
 TEST(SqlExecutionTest, MovingUpdateMaintainsEveryIndexAndDropRemovesTable) {
     TemporaryDatabase database;
     SqlFixture fixture(database.Path());

@@ -11,7 +11,8 @@ namespace {
 
 bool IsApiJsonPost(const crow::request& request) {
     return request.method == crow::HTTPMethod::POST &&
-           (request.url == "/api/query" || request.url == "/api/v1/query");
+           (request.url == "/api/query" || request.url == "/api/v1/query" ||
+            request.url == "/api/v1/batch");
 }
 
 bool IsAllowedOrigin(const ApiConfig& config, const std::string& origin) {
@@ -51,6 +52,9 @@ HttpRoute RouteMetric(std::string_view path) {
     }
     if (path == "/api/v1/stats/storage") {
         return HttpRoute::STORAGE_STATS;
+    }
+    if (path == "/api/v1/batch") {
+        return HttpRoute::BATCH;
     }
     return HttpRoute::OTHER;
 }

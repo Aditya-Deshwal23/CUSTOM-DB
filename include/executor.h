@@ -33,6 +33,10 @@ class Executor {
     std::string ExecuteQuery(const std::string& query);
     SqlExecutionResult ExecuteResult(const std::string& query, std::chrono::milliseconds timeout,
                                      uint64_t max_rows = MAX_RESULT_ROWS);
+    std::vector<SqlExecutionResult> ExecuteBatch(const std::vector<std::string>& queries,
+                                                 std::chrono::milliseconds timeout,
+                                                 uint64_t max_rows,
+                                                 size_t& failed_statement_index);
     std::vector<SqlTableMetadata> GetTables();
     std::optional<SqlTableMetadata> GetTable(std::string_view name);
     WriteAheadLog* Wal() const noexcept {

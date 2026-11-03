@@ -2575,6 +2575,113 @@ class SqlExecutionEngine::Impl {
         return result;
     }
 
+    std::vector<SqlExecutionResult> ExecuteBatch(const std::vector<std::string>& queries,
+                                                 std::chrono::milliseconds timeout,
+                                                 uint64_t max_rows,
+                                                 size_t& failed_statement_index) {
+        StatementScope scope(statement_gate_, true, std::chrono::steady_clock::now() + timeout);
+        std::unique_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
+        catalog_.Reload();
+        if (wal_ == nullptr) {
+            throw DbError(ErrorCode::INVALID_ARGUMENT,
+                          "SQL batches require an Executor constructed with a WAL");
+        }
+
+        std::shared_ptr<TxnContext> transaction;
+        std::vector<SqlExecutionResult> results;
+        results.reserve(queries.size());
+        try {
+            transaction = buffer_pool_->BeginTransaction(*wal_);
+            for (size_t query_index = 0; query_index < queries.size(); ++query_index) {
+                failed_statement_index = query_index;
+                SqlStatement statement;
+                try {
+                    statement = SqlParser(queries[query_index]).Parse();
+                } catch (const SqlError& error) {
+                    throw DbError(ErrorCode::INVALID_ARGUMENT, error.what());
+                }
+
+                SqlExecutionResult result;
+                result.statement = StatementName(statement.kind);
+                if (statement.kind == SqlStatementKind::SELECT) {
+                    CatalogTable& table = RequireTable(catalog_, statement.table);
+                    ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
+                                             &scope.Cancellation(), nullptr};
+                    QueryPlan plan = BuildSelectPlan(context, table, statement);
+                    RecordPlanType(plan.access_path);
+                    result.columns = plan.output_schema.columns;
+                    result.column_names = plan.output_names;
+                    result.plan = FormatPlan(plan);
+                    Tuple tuple;
+                    RID rid{};
+                    plan.root->Init();
+                    while (plan.root->Next(&tuple, &rid)) {
+                        if (result.rows.size() >= max_rows) {
+                            result.truncated = true;
+                            break;
+                        }
+                        result.rows.push_back(DeserializeTuple(plan.output_schema, tuple));
+                    }
+                    plan.root->Finish();
+                } else if (statement.kind == SqlStatementKind::SHOW_TABLES ||
+                           statement.kind == SqlStatementKind::DESCRIBE) {
+                    result.message = ExecuteReadMetadata(statement);
+                } else if (statement.kind == SqlStatementKind::EXPLAIN &&
+                           statement.explained_statement &&
+                           statement.explained_statement->kind == SqlStatementKind::SELECT) {
+                    ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
+                                             &scope.Cancellation(), nullptr};
+                    result.message = StatementPlan(*statement.explained_statement, catalog_,
+                                                   context);
+                    result.plan = result.message;
+                } else if (statement.kind == SqlStatementKind::CHECKPOINT ||
+                           statement.kind == SqlStatementKind::EXPLAIN) {
+                    throw DbError(ErrorCode::INVALID_ARGUMENT,
+                                  "This statement is not supported in an atomic batch");
+                } else {
+                    ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
+                                             &scope.Cancellation(), nullptr};
+                    result.message = ExecuteWrite(statement, context);
+                    const std::string suffix = " row(s) affected";
+                    const size_t marker = result.message.find(suffix);
+                    if (marker != std::string::npos) {
+                        const std::string_view number(result.message.data(), marker);
+                        const auto parsed = std::from_chars(
+                            number.data(), number.data() + number.size(), result.rows_affected);
+                        if (parsed.ec != std::errc{} ||
+                            parsed.ptr != number.data() + number.size()) {
+                            result.rows_affected = 0;
+                        }
+                    }
+                }
+                results.push_back(std::move(result));
+            }
+            transaction->Commit();
+            for (const SqlExecutionResult& result : results) {
+                if (!result.message.empty()) {
+                    RecordWrittenRows(result.message);
+                }
+            }
+            failed_statement_index = queries.size();
+            buffer_pool_->AssertNoPinsHeld();
+            return results;
+        } catch (const DbError&) {
+            if (transaction) {
+                transaction->Rollback();
+            }
+            catalog_.Reload();
+            buffer_pool_->AssertNoPinsHeld();
+            throw;
+        } catch (const std::exception&) {
+            if (transaction) {
+                transaction->Rollback();
+            }
+            catalog_.Reload();
+            buffer_pool_->AssertNoPinsHeld();
+            throw;
+        }
+    }
+
     std::vector<SqlTableMetadata> GetTables() {
         StatementScope scope(statement_gate_, false);
         std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
@@ -2859,6 +2966,12 @@ SqlExecutionResult SqlExecutionEngine::ExecuteResult(std::string_view query,
                                                      std::chrono::milliseconds timeout,
                                                      uint64_t max_rows) {
     return impl_->ExecuteResult(query, timeout, max_rows);
+}
+
+std::vector<SqlExecutionResult> SqlExecutionEngine::ExecuteBatch(
+    const std::vector<std::string>& queries, std::chrono::milliseconds timeout, uint64_t max_rows,
+    size_t& failed_statement_index) {
+    return impl_->ExecuteBatch(queries, timeout, max_rows, failed_statement_index);
 }
 
 std::vector<SqlTableMetadata> SqlExecutionEngine::GetTables() {

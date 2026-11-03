@@ -7,8 +7,9 @@ limitations below are part of the current design, not configuration switches.
 
 - One writer at a time; readers may share the statement gate. Writes are
   serialized for a complete statement and its WAL commit.
-- No MVCC, snapshot isolation, concurrent writers, or multi-statement
-  transactions. A SQL write statement is one auto-commit unit.
+- No MVCC, snapshot isolation, or concurrent writers. Writes are serialized
+  per statement; an atomic batch can group up to 50 statements in one
+  transaction, but transaction sessions do not span requests.
 - The WAL stores full-page after-images, so a small logical change can write a
   full 4096-byte physical page per changed page. This is write amplification.
 - Direct low-level `TableHeap`/B+ tree mutation outside `Executor` requires the
@@ -19,7 +20,9 @@ limitations below are part of the current design, not configuration switches.
 - SQL is a deliberately bounded subset; there are no joins, window functions,
   subqueries, composite SQL indexes, table-level/composite foreign keys, or
   general standards-level compatibility.
-- The serialized SQL catalog must fit in one 4080-byte page body.
+- The SQL catalog is stored in linked pages and has no one-page table-count
+  limit; each individual table's column and index counts remain bounded by
+  their on-disk `u16` fields.
 - Tuples are limited to approximately 4 KB (maximum encoded tuple size 4,067
   bytes). There are no overflow pages.
 - Sort and hash aggregation are in-memory and constrained by configured row
