@@ -1144,6 +1144,16 @@ void ApiServer::Impl::RegisterRoutes() {
     });
     CROW_ROUTE(app, "/api/v1/stats/buffer_pool")
         .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
+            const char* format = request.url_params.get("format");
+            if (format != nullptr) {
+                const std::string_view format_value(format);
+                if (format_value.size() > 7U ||
+                    (format_value != "compact" && format_value != "legacy")) {
+                    return ErrorResponse(400, "INVALID_ARGUMENT",
+                                         "format must be compact or legacy",
+                                         RequestContext(app, request).request_id);
+                }
+            }
             const auto inspection_gate = executor->AcquireInspectionGate();
             (void)inspection_gate;
             const std::vector<FrameInfo> frames = bpm->Snapshot();
@@ -1151,8 +1161,7 @@ void ApiServer::Impl::RegisterRoutes() {
             response["pool_size"] = bpm->PoolSize();
             response["snapshot_size"] = frames.size();
             response["pinned_frames"] = bpm->pinned_frames();
-            if (request.url_params.get("format") != nullptr &&
-                std::string_view(request.url_params.get("format")) == "legacy") {
+            if (format != nullptr && std::string_view(format) == "legacy") {
                 crow::json::wvalue::list frame_list;
                 frame_list.reserve(frames.size());
                 for (const FrameInfo& frame : frames) {

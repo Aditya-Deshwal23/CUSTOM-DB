@@ -61,12 +61,25 @@ def test_buffer_pool_compact_format_and_legacy_compatibility(api_server):
     legacy_status, legacy, _ = request_json(
         api_server, "/api/v1/stats/buffer_pool?format=legacy"
     )
+    explicit_compact_status, explicit_compact, _ = request_json(
+        api_server, "/api/v1/stats/buffer_pool?format=compact"
+    )
+    invalid_enum_status, invalid_enum, _ = request_json(
+        api_server, "/api/v1/stats/buffer_pool?format=unknown"
+    )
+    invalid_status, invalid, _ = request_json(
+        api_server, "/api/v1/stats/buffer_pool?format=buffer_pool"
+    )
 
     assert compact_status == 200
     assert compact["encoding"] == "base64-state-v1"
     assert len(base64.b64decode(compact["states_base64"])) == compact["snapshot_size"]
     assert len(json.dumps(compact)) <= 20 * 1024
     assert legacy_status == 200 and isinstance(legacy["frames"], list)
+    assert explicit_compact_status == 200
+    assert explicit_compact["encoding"] == "base64-state-v1"
+    assert invalid_enum_status == 400 and invalid_enum["error"]["code"] == "INVALID_ARGUMENT"
+    assert invalid_status == 400 and invalid["error"]["code"] == "INVALID_ARGUMENT"
 
 
 def test_catalog_is_returned_in_one_bounded_response(api_server):
