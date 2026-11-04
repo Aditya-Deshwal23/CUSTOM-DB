@@ -100,14 +100,21 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md), [WAL_AND_RECOVERY.md](docs/WAL_AND_
 
 ## Benchmark headline
 
-Five seeded, warm point-read runs against 10,000 rows on an Apple M5 (`arm64`), macOS 27.0.1, Python 3.14.7, SQLite 3.53.4 (observed 2026-11-01); 1,000 reads per engine per run. Setup is excluded. CUSTOM-DB is measured through its HTTP/JSON API, while SQLite is measured in-process through Python's `sqlite3` module, so this is a user-facing path comparison, **not an apples-to-apples engine-core benchmark**.
+There is currently no apples-to-apples SQLite headline. The former comparison
+mixed CUSTOM-DB's HTTP/JSON path with Python's in-process SQLite API, so its
+numbers have been removed from this headline rather than presented as an
+engine-core comparison. [`scripts/bench.sh`](scripts/bench.sh) now drives a
+matched in-process `Executor` versus system SQLite C API harness and prints
+seeded JSONL measurements with throughput and tail latency. No measured
+headline is published until the complete workload matrix is captured and
+reviewed. This harness does not yet include the service-path wrappers, and SQL
+JOIN measurements remain unavailable until JOIN support exists. Existing
+component measurements and methodology notes remain in [BENCHMARKS.md](docs/BENCHMARKS.md).
 
-| Implementation / path | Median throughput | Median p50 | Median p95 |
-|---|---:|---:|---:|
-| CUSTOM-DB, HTTP + JSON | 6,124 reads/s | 158.5 us | 193.0 us |
-| SQLite, Python `sqlite3` | 666,426 reads/s | 1.38 us | 1.79 us |
-
-Reproduce with [`tools/benchmark_sqlite.py`](tools/benchmark_sqlite.py); full methodology and other engine benchmarks are in [BENCHMARKS.md](docs/BENCHMARKS.md). These are local observations, not performance promises.
+| Comparison | Status |
+|---|---|
+| Engine core: CUSTOM-DB `Executor` vs SQLite C API | Harness available; full matrix not yet recorded |
+| Service path: CUSTOM-DB HTTP vs SQLite C++ HTTP wrapper | Wrapper and measurements not yet implemented |
 
 ## Durability demonstration
 

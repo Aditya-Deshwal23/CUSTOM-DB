@@ -1,6 +1,36 @@
 # Benchmarks
 
+## Fair in-process SQLite comparison
+
+[`../scripts/bench.sh`](../scripts/bench.sh) builds
+[`../bench/sqlite_baseline.cpp`](../bench/sqlite_baseline.cpp) and runs the same
+file-backed schema, seeded keys, and supported operation mixes through CUSTOM-DB's
+in-process `Executor` and SQLite's system C API. SQLite uses prepared statements
+and WAL mode; both engines receive the same requested `FULL`, `NORMAL`, or
+`OFF` durability setting. Results include throughput and p50/p95/p99 latency.
+The benchmark setup is excluded from timed operations.
+
+Run a short functional pass with `scripts/bench.sh --smoke`. The full default
+matrix is 10k/100k/1M rows by 1/2/4/8 threads, with point reads, 100-row range
+scans, inserts with and without durability, updates, and YCSB A/B/C/E. Set
+`OUTPUT=docs/benchmarks/fair-in-process.jsonl` to preserve a generated run.
+This result file is not committed until the full matrix has been run and
+reviewed on the stated host. JOIN and the service-path comparisons are not
+implemented in this checkout, so no result for either is claimed.
+
+The YCSB mixes are A (50% point reads, 50% updates), B (95% point reads, 5%
+updates), C (100% point reads), and E (95% 100-row range scans, 5% inserts).
+Each backend receives the same deterministic operation sequence for a given
+seed. SQLite reuses bound C API prepared statements; CUSTOM-DB currently parses
+each SQL string through `Executor`, since the engine has no prepared-statement
+interface. That difference is part of the measured API capability and must be
+mentioned when interpreting a ratio.
+
 ## Headline comparison with SQLite
+
+This is a historical, explicitly non-apples-to-apples HTTP-versus-Python
+observation. It is not the README headline and must not be used as evidence for
+the new fair comparison.
 
 `tools/benchmark_sqlite.py` creates the same 10,000-row primary-key table in a
 temporary CUSTOM-DB file and a temporary SQLite file, populates both outside

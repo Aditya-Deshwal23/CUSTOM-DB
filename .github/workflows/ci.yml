@@ -51,6 +51,23 @@ jobs:
       - name: Smoke-test the SQLite comparison benchmark
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         run: python3 tools/benchmark_sqlite.py --binary build/relational_db --rows 1000 --iterations 100 --repetitions 1 --seed 1337
+      - name: Install system SQLite development files
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Configure fair in-process benchmark
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: cmake -S . -B build-fair-bench -DCMAKE_BUILD_TYPE=Debug -DRELDB_BUILD_SQLITE_BENCHMARK=ON -DRELDB_BUILD_BENCHMARKS=OFF -DRELDB_WERROR=ON
+      - name: Build fair in-process benchmark
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: cmake --build build-fair-bench --parallel --target reldb_fair_bench
+      - name: Smoke-test custom Executor and SQLite C API benchmark
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: ctest --test-dir build-fair-bench --output-on-failure -R reldb_fair_benchmark_smoke
+      - name: Verify supported fair-benchmark workload matrix
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        env:
+          BUILD_DIR: build-fair-bench
+        run: scripts/bench.sh --smoke
       - name: Verify HTTP examples and shutdown
         run: scripts/verify_resume_claims.sh
       - name: Set up Python for API contract tests
@@ -210,8 +227,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install system SQLite development files
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - name: Configure
-        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=thread -DRELDB_WERROR=ON
+        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DRELDB_SANITIZE=thread -DRELDB_BUILD_SQLITE_BENCHMARK=ON -DRELDB_WERROR=ON
       - name: Build
         run: cmake --build build-tsan --parallel
       - name: Prepare TSan runtime
@@ -227,6 +246,8 @@ jobs:
           RELDB_CONCURRENCY_STRESS_SECONDS=10 build-tsan/reldb_regression_tests --gtest_filter=ConcurrencyTest.SqlExecutorStatementGateTsanStress | tee -a tsan.log
       - name: Run WAL timer TSan stress
         run: build-tsan/reldb_regression_tests --gtest_filter=WalTest.NormalModeSyncThreadTsanClean
+      - name: Run seeded fair-benchmark concurrency stress
+        run: build-tsan/reldb_fair_bench --rows 1000 --operations 200 --threads 4 --workload ycsb_a --durability off --seed 731291
       - name: Fuzz API middleware concurrently under TSan (200 seeded requests)
         run: python3 tests/api/fuzz_api.py --binary build-tsan/relational_db --iterations 200 --seed 731291 --concurrent
       - name: Upload TSan log on failure
@@ -286,6 +307,14 @@ jobs:
       - name: Record built image size
         run: |
           docker image ls --no-trunc --filter reference=custom-db:ci | tee image-size.txt
+          image_size_bytes="$(docker image inspect --format='{{.Size}}' custom-db:ci)"
+          max_image_size_bytes=60000000
+          if ((image_size_bytes > max_image_size_bytes)); then
+            echo "Image size ${image_size_bytes} bytes exceeds the 60 MB budget." >&2
+            exit 1
+          fi
+          printf 'Image-size budget: %s bytes / %s bytes\n' \
+            "${image_size_bytes}" "${max_image_size_bytes}" | tee -a "${GITHUB_STEP_SUMMARY}"
           cat image-size.txt >> "${GITHUB_STEP_SUMMARY}"
       - name: Dockle container configuration scan
         run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock goodwithtech/dockle:v0.4.15 --exit-code 1 --exit-level WARN custom-db:ci

@@ -13,6 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(RELDB_WERROR "Treat project compiler warnings as errors" OFF)
 option(RELDB_BUILD_TESTS "Build GoogleTest regression tests" ON)
 option(RELDB_BUILD_BENCHMARKS "Build Google Benchmark targets" ON)
+option(RELDB_BUILD_SQLITE_BENCHMARK "Build the in-process SQLite C API comparison benchmark" OFF)
 option(RELDB_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 set(RELDB_SANITIZE "none" CACHE STRING "Sanitizer: address, undefined, thread, or none")
 set_property(CACHE RELDB_SANITIZE PROPERTY STRINGS address undefined thread none)
@@ -78,6 +79,13 @@ if(RELDB_BUILD_FUZZERS)
 endif()
 
 find_package(Threads REQUIRED)
+
+if(RELDB_BUILD_SQLITE_BENCHMARK)
+  find_package(SQLite3 REQUIRED)
+  add_executable(reldb_fair_bench bench/sqlite_baseline.cpp)
+  target_include_directories(reldb_fair_bench PRIVATE include)
+  target_link_libraries(reldb_fair_bench PRIVATE reldb_core SQLite3::SQLite3 Threads::Threads)
+endif()
 
 add_library(reldb_core STATIC
   src/config.cpp
@@ -190,6 +198,14 @@ if(RELDB_BUILD_TESTS)
   target_link_libraries(reldb_regression_tests PRIVATE reldb_core GTest::gtest_main)
   add_dependencies(reldb_regression_tests relational_db)
   add_test(NAME reldb_regression_tests COMMAND reldb_regression_tests)
+  if(RELDB_BUILD_SQLITE_BENCHMARK)
+    add_test(NAME reldb_fair_benchmark_smoke
+      COMMAND reldb_fair_bench --rows 1000 --operations 20 --threads 1
+              --workload point --durability full)
+    add_test(NAME reldb_fair_benchmark_concurrency_smoke
+      COMMAND reldb_fair_bench --rows 1000 --operations 200 --threads 4
+              --workload ycsb_a --durability off --seed 731291)
+  endif()
 
   add_executable(reldb_disk_sync_probe tests/disk_sync_probe.cpp)
   target_include_directories(reldb_disk_sync_probe PRIVATE include)
@@ -231,6 +247,9 @@ if(RELDB_BUILD_BENCHMARKS)
   list(APPEND project_targets reldb_metrics_overhead_benchmarks)
   list(APPEND project_targets reldb_sql_parse_benchmarks)
   list(APPEND project_targets reldb_ycsb_benchmarks)
+endif()
+if(RELDB_BUILD_SQLITE_BENCHMARK)
+  list(APPEND project_targets reldb_fair_bench)
 endif()
 foreach(target IN LISTS project_targets)
   reldb_configure_project_target(${target})
