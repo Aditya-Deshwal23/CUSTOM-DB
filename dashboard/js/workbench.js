@@ -527,7 +527,7 @@ function setupResultExport() {
             document.body.appendChild(link);
             link.click();
             link.remove();
-            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+            requestAnimationFrame(() => URL.revokeObjectURL(url));
         } catch (error) {
             status(`Could not export results: ${error.message}`, true);
         }
@@ -778,10 +778,15 @@ function parseAliases(source, tables) {
 async function loadCatalog() {
     if (state.catalogPromise) return state.catalogPromise;
     state.catalogPromise = new Promise((resolve, reject) => {
+        const timeoutSignal = AbortSignal.timeout(5000);
         const cleanup = () => {
-            clearTimeout(timeout);
             window.removeEventListener("custom-db:catalog", onCatalog);
             window.removeEventListener("custom-db:catalog-error", onError);
+            timeoutSignal.removeEventListener("abort", onTimeout);
+        };
+        const onTimeout = () => {
+            cleanup();
+            reject(new Error("Catalog refresh timed out."));
         };
         const onCatalog = (event) => {
             state.catalog = event.detail || [];
@@ -792,12 +797,9 @@ async function loadCatalog() {
             cleanup();
             reject(new Error(event.detail?.message || "Catalog refresh failed."));
         };
-        const timeout = window.setTimeout(() => {
-            cleanup();
-            reject(new Error("Catalog refresh timed out."));
-        }, 5000);
         window.addEventListener("custom-db:catalog", onCatalog);
         window.addEventListener("custom-db:catalog-error", onError);
+        timeoutSignal.addEventListener("abort", onTimeout, { once: true });
         window.dispatchEvent(new Event("custom-db:catalog-request"));
     }).catch((error) => {
         status(`Autocomplete catalog unavailable: ${error.message}`, true);

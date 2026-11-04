@@ -80,13 +80,6 @@ endif()
 
 find_package(Threads REQUIRED)
 
-if(RELDB_BUILD_SQLITE_BENCHMARK)
-  find_package(SQLite3 REQUIRED)
-  add_executable(reldb_fair_bench bench/sqlite_baseline.cpp)
-  target_include_directories(reldb_fair_bench PRIVATE include)
-  target_link_libraries(reldb_fair_bench PRIVATE reldb_core SQLite3::SQLite3 Threads::Threads)
-endif()
-
 add_library(reldb_core STATIC
   src/config.cpp
   src/metrics/metrics.cpp
@@ -108,6 +101,20 @@ add_library(reldb_core STATIC
 )
 target_include_directories(reldb_core PUBLIC include)
 target_link_libraries(reldb_core PUBLIC Threads::Threads)
+
+if(RELDB_BUILD_SQLITE_BENCHMARK)
+  find_package(SQLite3 REQUIRED)
+  if(TARGET SQLite3::SQLite3)
+    set(RELDB_SQLITE_TARGET SQLite3::SQLite3)
+  elseif(TARGET SQLite::SQLite3)
+    set(RELDB_SQLITE_TARGET SQLite::SQLite3)
+  else()
+    message(FATAL_ERROR "FindSQLite3 did not provide an imported SQLite target")
+  endif()
+  add_executable(reldb_fair_bench bench/sqlite_baseline.cpp)
+  target_include_directories(reldb_fair_bench PRIVATE include)
+  target_link_libraries(reldb_fair_bench PRIVATE reldb_core ${RELDB_SQLITE_TARGET} Threads::Threads)
+endif()
 
 add_executable(relational_db src/main.cpp)
 execute_process(
