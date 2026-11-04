@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "api_server.h"
+#include "concurrency.h"
 #include "crow.h"
 #include "db_error.h"
 #include "sql_parser.h"
@@ -36,6 +37,13 @@ struct SlowQuerySample {
     std::string sql_preview;
     std::string plan_summary;
     std::string request_id;
+};
+
+struct ActiveQuery {
+    std::string request_id;
+    std::string sql_preview;
+    std::chrono::steady_clock::time_point started;
+    std::shared_ptr<CancellationToken> cancellation;
 };
 
 struct ApiRequestContext {
@@ -104,6 +112,8 @@ struct ApiServer::Impl {
     std::thread sampler_thread;
     std::mutex slow_queries_mutex;
     std::deque<SlowQuerySample> slow_queries;
+    std::mutex active_queries_mutex;
+    std::unordered_map<std::string, ActiveQuery> active_queries;
 };
 
 crow::response JsonResponse(int status, const crow::json::wvalue& value);

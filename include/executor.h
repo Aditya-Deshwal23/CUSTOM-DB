@@ -32,11 +32,13 @@ class Executor {
      */
     std::string ExecuteQuery(const std::string& query);
     SqlExecutionResult ExecuteResult(const std::string& query, std::chrono::milliseconds timeout,
-                                     uint64_t max_rows = MAX_RESULT_ROWS);
+                                     uint64_t max_rows = MAX_RESULT_ROWS,
+                                     CancellationToken* external_cancellation = nullptr);
     std::vector<SqlExecutionResult> ExecuteBatch(const std::vector<std::string>& queries,
                                                  std::chrono::milliseconds timeout,
                                                  uint64_t max_rows,
-                                                 size_t& failed_statement_index);
+                                                 size_t& failed_statement_index,
+                                                 CancellationToken* external_cancellation = nullptr);
     std::vector<SqlTableMetadata> GetTables(uint64_t max_pages = 4096);
     std::optional<SqlTableMetadata> GetTable(std::string_view name);
     std::vector<InspectedPage> InspectPages(page_id_t from, uint64_t count);

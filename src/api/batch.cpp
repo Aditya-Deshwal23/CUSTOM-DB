@@ -283,6 +283,27 @@ crow::response HandleBatch(ApiServer::Impl& server, const crow::request& request
                                      request_id);
             }
             queries = SplitBatchScript(script, rolled_back);
+            if (!rolled_back && input.has("params")) {
+                crow::json::rvalue empty_params = crow::json::load("[]");
+                const crow::json::rvalue& params = input["params"];
+                bool has_parameters = false;
+                for (std::string& query : queries) {
+                    const std::vector<SqlToken> tokens = SqlLexer::Tokenize(query);
+                    const bool statement_has_parameters =
+                        std::any_of(tokens.begin(), tokens.end(), [](const SqlToken& token) {
+                            return token.kind == SqlTokenKind::PARAMETER;
+                        });
+                    has_parameters = has_parameters || statement_has_parameters;
+                    query = BindParameters(query, statement_has_parameters ? params : empty_params);
+                    if (query.size() > server.config.max_sql_bytes) {
+                        throw std::length_error(
+                            "bound statement exceeds MAX_SQL_BYTES");
+                    }
+                }
+                if (!has_parameters && params.size() != 0U) {
+                    throw std::invalid_argument("params supplied but script has no parameters");
+                }
+            }
         } else {
             throw std::invalid_argument("provide statements array or transaction script");
         }
@@ -342,11 +363,37 @@ crow::response HandleBatch(ApiServer::Impl& server, const crow::request& request
         return ErrorResponse(507, "STORAGE_QUOTA", "Database storage quota exceeded", request_id);
     }
 
+    auto cancellation = std::make_shared<CancellationToken>(
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(server.config.statement_timeout_ms));
+    {
+        std::lock_guard<std::mutex> lock(server.active_queries_mutex);
+        if (server.active_queries.size() >= 100U ||
+            server.active_queries.find(request_id) != server.active_queries.end()) {
+            return ErrorResponse(429, "BUSY",
+                                "Too many active statements or duplicate request ID", request_id);
+        }
+        ActiveQuery active;
+        active.request_id = request_id;
+        active.sql_preview = "BATCH statement";
+        active.started = std::chrono::steady_clock::now();
+        active.cancellation = cancellation;
+        server.active_queries.emplace(request_id, std::move(active));
+    }
+    struct ActiveQueryCleanup {
+        ApiServer::Impl& server;
+        const std::string& request_id;
+        ~ActiveQueryCleanup() {
+            std::lock_guard<std::mutex> lock(server.active_queries_mutex);
+            server.active_queries.erase(request_id);
+        }
+    } cleanup{server, request_id};
+
     size_t failed_statement_index = 0;
     try {
         const std::vector<SqlExecutionResult> results = server.executor->ExecuteBatch(
             queries, std::chrono::milliseconds(server.config.statement_timeout_ms),
-            server.config.max_result_rows, failed_statement_index);
+            server.config.max_result_rows, failed_statement_index, cancellation.get());
         crow::json::wvalue response;
         response["ok"] = true;
         response["committed"] = true;

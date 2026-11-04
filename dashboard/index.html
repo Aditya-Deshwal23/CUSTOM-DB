@@ -109,20 +109,98 @@
                         <p class="eyebrow">Engine interface</p>
                         <h2 id="queryHeading">SQL query console</h2>
                     </div>
-                    <span class="keyboard-hint">Ctrl + Enter to run</span>
+                    <span class="keyboard-hint">Ctrl + Enter runs statement · Ctrl + Shift + Enter runs script</span>
+                </div>
+                <div id="queryTabs" class="query-tabs" role="tablist" aria-label="Query tabs"></div>
+                <div class="query-toolbar" aria-label="SQL editor actions">
+                    <button id="newQueryTab" class="button button-secondary" type="button"
+                            title="New query tab (Ctrl+T)">New tab</button>
+                    <button id="formatSqlButton" class="button button-secondary" type="button"
+                            title="Format SQL (Ctrl+Shift+F)">Format</button>
+                    <button id="findButton" class="button button-secondary" type="button"
+                            title="Find and replace (Ctrl+F)">Find</button>
+                    <label class="toggle-control"><input id="batchToggle" type="checkbox">
+                        Atomic batch</label>
+                    <label class="toggle-control"><input id="runPlanToggle" type="checkbox">
+                        Run with plan</label>
+                </div>
+                <div id="findReplaceBar" class="find-replace-bar" hidden>
+                    <label for="findInput">Find</label><input id="findInput" class="control">
+                    <label for="replaceInput">Replace</label><input id="replaceInput" class="control">
+                    <button id="findNextButton" class="button button-secondary" type="button">Next</button>
+                    <button id="replaceButton" class="button button-secondary" type="button">Replace all</button>
+                    <button id="closeFindButton" class="button button-secondary" type="button">Close</button>
                 </div>
                 <label class="sr-only" for="sqlInput">SQL statement</label>
-                <div class="console-container">
-                    <span class="prompt" aria-hidden="true">db&gt;</span>
-                    <textarea id="sqlInput" class="console-input" rows="3"
-                              placeholder="Enter a SQL query" spellcheck="false"
-                              autocomplete="off" aria-describedby="queryHelp"></textarea>
-                    <button id="runQueryButton" class="button button-primary" type="button">Run</button>
+                <div id="sqlEditorShell" class="sql-editor-shell">
+                    <div id="lineNumbers" class="line-numbers" aria-hidden="true"></div>
+                    <div class="sql-editor">
+                        <pre id="editorHighlight" class="editor-highlight" aria-hidden="true"></pre>
+                        <div id="currentLine" class="current-line" aria-hidden="true" hidden></div>
+                        <textarea id="sqlInput" class="console-input sql-input" rows="12"
+                                  placeholder="Enter SQL" spellcheck="false"
+                                  autocomplete="off" autocapitalize="off"
+                                  aria-describedby="queryHelp editorDiagnostic"></textarea>
+                    </div>
+                    <div id="autocompleteList" class="autocomplete-list" role="listbox"
+                         aria-label="SQL completions" hidden></div>
                 </div>
-                <p id="queryHelp" class="help-text">Use the engine's SQL subset. Up/Down recalls local query history.</p>
+                <div id="editorDiagnostic" class="editor-diagnostic" role="alert" hidden></div>
+                <div id="editorWarnings" class="editor-warnings" aria-live="polite"></div>
+                <div id="parameterBar" class="parameter-bar" hidden></div>
+                <p id="runExplanation" class="help-text" role="status"></p>
+                <p id="queryHelp" class="help-text">Tab indents · Ctrl+/ comments · Ctrl+Space completes · Ctrl+Enter runs · Esc cancels</p>
+                <div class="query-run-row">
+                    <button id="runQueryButton" class="button button-primary" type="button">Run</button>
+                    <button id="stopQueryButton" class="button button-secondary" type="button" disabled>Stop</button>
+                    <span class="keyboard-hint">Ctrl+T new tab · Ctrl+W close tab · F2 results</span>
+                </div>
                 <div id="queryStatus" class="query-status" role="status" aria-live="polite"></div>
-                <div id="queryResult" class="query-result" aria-live="polite">
-                    <p class="empty-state">Query results and EXPLAIN plans appear here.</p>
+                <section id="queryOutput" class="query-output" aria-label="Query output">
+                    <div class="output-tabs" role="tablist" aria-label="Query output views">
+                        <button class="output-tab" type="button" role="tab" aria-selected="true"
+                                data-panel="results">Results</button>
+                        <button class="output-tab" type="button" role="tab" aria-selected="false"
+                                data-panel="messages">Messages</button>
+                        <button class="output-tab" type="button" role="tab" aria-selected="false"
+                                data-panel="plan">Plan</button>
+                        <button class="output-tab" type="button" role="tab" aria-selected="false"
+                                data-panel="history">History</button>
+                        <button class="output-tab" type="button" role="tab" aria-selected="false"
+                                data-panel="activity">Activity</button>
+                    </div>
+                    <div id="resultsPanel" class="output-panel">
+                        <div id="resultChoices" class="result-choices"></div>
+                        <div class="result-export-bar">
+                            <label for="resultExportFormat">Export results</label>
+                            <select id="resultExportFormat" class="control">
+                                <option>CSV</option><option>JSON</option>
+                                <option>Markdown</option><option>SQL INSERT</option>
+                            </select>
+                            <button id="copyResultsButton" class="button button-secondary"
+                                    type="button">Copy</button>
+                            <button id="downloadResultsButton" class="button button-secondary"
+                                    type="button">Download</button>
+                        </div>
+                        <div id="queryResult" class="query-result" aria-live="polite">
+                            <p class="empty-state">Query results and EXPLAIN plans appear here.</p>
+                        </div>
+                    </div>
+                    <div id="messagesPanel" class="output-panel" hidden></div>
+                    <div id="planPanel" class="output-panel plan-panel" hidden></div>
+                    <div id="historyPanel" class="output-panel" hidden>
+                        <div class="history-toolbar">
+                            <label for="historyFilter">Filter history</label>
+                            <input id="historyFilter" class="control" type="search">
+                            <button id="historyPinAll" class="button button-secondary"
+                                    type="button">Pin all</button>
+                        </div>
+                        <div id="historyList"></div>
+                    </div>
+                    <div id="activityPanel" class="output-panel" hidden>
+                        <button id="refreshActivity" class="button button-secondary" type="button">Refresh</button>
+                        <div id="activityList"><p class="empty-state">Activity not loaded.</p></div>
+                    </div>
                 </div>
             </section>
 

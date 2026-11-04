@@ -227,10 +227,12 @@ std::string Executor::ExecuteQuery(const std::string& query) {
 }
 
 SqlExecutionResult Executor::ExecuteResult(const std::string& query,
-                                           std::chrono::milliseconds timeout, uint64_t max_rows) {
+                                           std::chrono::milliseconds timeout, uint64_t max_rows,
+                                           CancellationToken* external_cancellation) {
     StatementMetricScope statement_metrics(query, MetricsRegistry::Instance());
     try {
-        SqlExecutionResult result = sql_engine_->ExecuteResult(query, timeout, max_rows);
+        SqlExecutionResult result =
+            sql_engine_->ExecuteResult(query, timeout, max_rows, external_cancellation);
         bpm_->AssertNoPinsHeld();
         return result;
     } catch (const DbError&) {
@@ -241,10 +243,11 @@ SqlExecutionResult Executor::ExecuteResult(const std::string& query,
 
 std::vector<SqlExecutionResult> Executor::ExecuteBatch(
     const std::vector<std::string>& queries, std::chrono::milliseconds timeout, uint64_t max_rows,
-    size_t& failed_statement_index) {
+    size_t& failed_statement_index, CancellationToken* external_cancellation) {
     try {
         std::vector<SqlExecutionResult> results =
-            sql_engine_->ExecuteBatch(queries, timeout, max_rows, failed_statement_index);
+            sql_engine_->ExecuteBatch(queries, timeout, max_rows, failed_statement_index,
+                                      external_cancellation);
         bpm_->AssertNoPinsHeld();
         return results;
     } catch (const DbError&) {

@@ -320,7 +320,16 @@ def test_atomic_batch_script_controls_and_statement_limit(api_server):
         },
     )
     assert rollback_status == 200 and rollback["committed"] is False
-    assert post_sql(api_server, "SELECT id FROM batch_script")[1]["rows"] == [[4]]
+    parameterized_status, parameterized, _ = request_json(
+        api_server,
+        "/api/v1/batch",
+        {
+            "script": "BEGIN; INSERT INTO batch_script VALUES ($1); COMMIT;",
+            "params": [6],
+        },
+    )
+    assert parameterized_status == 200 and parameterized["committed"] is True
+    assert post_sql(api_server, "SELECT id FROM batch_script ORDER BY id")[1]["rows"] == [[4], [6]]
 
     too_many_status, too_many, _ = request_json(
         api_server,
@@ -389,7 +398,10 @@ def test_catalog_foreign_keys_survive_restart(tmp_path):
 
 
 def test_static_dashboard_security_headers(api_server):
-    for path in ("/", "/index.js", "/index.css", "/api/v1/version", "/api/v1/snapshot"):
+    for path in (
+        "/", "/index.js", "/index.css", "/js/workbench.js", "/js/components/editor.js",
+        "/js/sql/lexer.js", "/api/v1/version", "/api/v1/snapshot",
+    ):
         status, _, headers = http_request(api_server, path)
         assert status == 200
         for name, value in EXPECTED_SECURITY_HEADERS.items():
@@ -784,6 +796,13 @@ def test_openapi_spec_and_query_example(api_server):
     with open(spec_path, encoding="utf-8") as source:
         spec = yaml.safe_load(source)
     validate(spec)
+    activity_status, activity, _ = request_json(api_server, "/api/v1/activity")
+    assert activity_status == 200 and activity["activity"] == []
+    cancel_status, cancelled, _ = http_request(
+        api_server, "/api/v1/query/not-active", method="DELETE"
+    )
+    cancelled = json.loads(cancelled)
+    assert cancel_status == 404 and cancelled["error"]["code"] == "QUERY_NOT_ACTIVE"
 
     assert post_sql(api_server, "CREATE TABLE documented (id INT PRIMARY KEY)")[0] == 200
     assert post_sql(api_server, "INSERT INTO documented VALUES (31)")[0] == 200

@@ -123,16 +123,32 @@ def test_inspector_authentication_and_disable_switch(tmp_path):
         tmp_path, {"API_KEY": "inspection-secret"}, db_path=tmp_path / "auth.db"
     ) as (base_url, _):
         assert http_request(base_url, "/api/v1/snapshot")[0] == 401
+        assert http_request(base_url, "/api/v1/activity")[0] == 401
+        assert http_request(
+            base_url, "/api/v1/query/not-active", method="DELETE"
+        )[0] == 401
         assert http_request(
             base_url,
             "/api/v1/snapshot",
             headers={"X-API-Key": "inspection-secret"},
         )[0] == 200
+        assert http_request(
+            base_url,
+            "/api/v1/activity",
+            headers={"X-API-Key": "inspection-secret"},
+        )[0] == 200
+        assert http_request(
+            base_url,
+            "/api/v1/query/not-active",
+            headers={"X-API-Key": "inspection-secret"},
+            method="DELETE",
+        )[0] == 404
 
     with running_server(
         tmp_path, {"INSPECT_ENABLED": "0"}, db_path=tmp_path / "disabled.db"
     ) as (base_url, _):
         assert http_request(base_url, "/api/v1/snapshot")[0] == 404
+        assert http_request(base_url, "/api/v1/activity")[0] == 404
         assert http_request(base_url, "/api/v1/stats")[0] == 200
 
 

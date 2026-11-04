@@ -32,6 +32,7 @@ bool IsSafeRequestId(const std::string& value) {
 HttpRoute RouteMetric(std::string_view path) {
     if (path == "/api/v1/snapshot" || path == "/api/v1/catalog" ||
         path == "/api/v1/stats/history" || path == "/api/v1/slow-queries" ||
+        path == "/api/v1/activity" ||
         path.rfind("/api/v1/inspect/", 0) == 0 ||
         (path.rfind("/api/v1/tables/", 0) == 0 && path.find("/rows") != std::string_view::npos)) {
         return HttpRoute::INSPECTOR;

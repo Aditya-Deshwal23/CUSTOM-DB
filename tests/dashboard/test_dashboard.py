@@ -102,6 +102,11 @@ def test_real_dashboard_query_offline_restart_and_recovery(tmp_path):
             ))
             page.goto(base_url, wait_until="networkidle")
             page.locator("#statusText").get_by_text("LIVE ENGINE", exact=True).wait_for(timeout=10000)
+            font_response = page.request.get(
+                base_url + "/fonts/IBMPlexMono-Regular.woff2"
+            )
+            assert font_response.status == 200
+            assert font_response.body().startswith(b"wOF2")
             try:
                 page.locator(".schema-table h3").filter(has_text="browser_smoke").wait_for(timeout=5000)
             except Exception as error:
@@ -122,9 +127,37 @@ def test_real_dashboard_query_offline_restart_and_recovery(tmp_path):
             page.get_by_role("cell", name=hostile_text, exact=True).wait_for(timeout=10000)
             assert page.locator("#resultTable tbody td").last.inner_text() == hostile_text
             assert page.locator("#resultTable img").count() == 0
+            page.locator("#sqlInput").fill(
+                "SELECT label FROM browser_smoke WHERE id = $1"
+            )
+            page.get_by_label("Value for parameter $1").fill("1")
+            page.locator("#sqlInput").press("Control+Enter")
+            page.get_by_role("cell", name="real row", exact=True).wait_for(timeout=10000)
+            page.locator("#batchToggle").check()
+            page.locator("#sqlInput").fill(
+                "BEGIN; INSERT INTO browser_smoke VALUES (1, 'rolled back'); COMMIT;"
+            )
+            page.locator("#sqlInput").press("Control+Enter")
+            page.locator("#messagesPanel .message-error").wait_for(timeout=10000)
+            page.locator("#batchToggle").uncheck()
+            page.locator("#sqlInput").fill(
+                "SELECT label FROM browser_smoke WHERE id = 1"
+            )
+            page.locator("#sqlInput").press("Control+Enter")
+            page.get_by_role("cell", name="real row", exact=True).wait_for(timeout=10000)
             page.locator("#sqlInput").fill("")
             page.locator("#sqlInput").press("ArrowUp")
-            assert page.locator("#sqlInput").input_value() == "SELECT label FROM browser_smoke WHERE id = 2"
+            assert page.locator("#sqlInput").input_value() == \
+                "SELECT label FROM browser_smoke WHERE id = 1"
+            page.locator("#newQueryTab").click()
+            page.locator("#sqlInput").fill("SELECT 'persisted tab'")
+            page.reload(wait_until="networkidle")
+            page.locator("#statusText").get_by_text("LIVE ENGINE", exact=True).wait_for(timeout=10000)
+            assert page.locator("#sqlInput").input_value() == "SELECT 'persisted tab'"
+            page.locator(".output-tab[data-panel='history']").click()
+            page.locator("#historyList .history-entry").first.wait_for()
+            page.locator("#historyPinAll").click()
+            assert page.locator("#historyList").get_by_role("button", name="Unpin").count() > 0
             page.locator("#sqlInput").fill(
                 "EXPLAIN ANALYZE SELECT id FROM browser_smoke WHERE id = 1"
             )
@@ -138,15 +171,17 @@ def test_real_dashboard_query_offline_restart_and_recovery(tmp_path):
             process.send_signal(signal.SIGKILL)
             process.wait(timeout=5)
             page.get_by_role("alert").wait_for(timeout=8000)
-            assert "Offline" in page.locator("#offlineTitle").inner_text() or \
-                "Waking up" in page.locator("#offlineTitle").inner_text()
+            assert page.locator("#offlineTitle").inner_text() in {
+                "Offline", "Waking up", "Engine unavailable"
+            }
             assert page.locator("#cacheHitRate").inner_text() == "—"
 
             restarted = start_server(port, database)
             wait_ready(restarted, base_url)
             status, storage = request_json(base_url, "/api/v1/stats/storage")
             assert status == 200 and storage["recovery"]["ran"] is True
-            page.locator("#retryButton").click()
+            if page.locator("#retryButton").is_visible():
+                page.locator("#retryButton").click()
             page.get_by_text("LIVE ENGINE", exact=True).wait_for(timeout=10000)
             page.locator("#recoverySummary").get_by_text("Ran", exact=False).wait_for()
             browser.close()
@@ -381,7 +416,7 @@ def test_studio_explorer_table_views_and_atomic_inline_edit(tmp_path):
             page.get_by_role("dialog").get_by_text(
                 "UPDATE studio_parent SET label = ? WHERE id = ?", exact=True
             ).wait_for()
-            page.get_by_role("button", name="Close").click()
+            page.get_by_role("button", name="Close", exact=True).click()
             page.get_by_role("button", name="Apply", exact=True).click()
             page.get_by_role("gridcell", name="updated", exact=True).wait_for(timeout=10000)
 

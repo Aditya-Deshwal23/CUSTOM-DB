@@ -355,6 +355,28 @@ TEST(SqlExecutionTest, AtomicBatchRollsBackEarlierStatementsOnFailure) {
     fixture.bpm->AssertNoPinsHeld();
 }
 
+TEST(SqlExecutionTest, ExternallyCancelledQueryAndBatchDoNotCommit) {
+    TemporaryDatabase database;
+    SqlFixture fixture(database.Path());
+    fixture.executor->ExecuteQuery("CREATE TABLE cancel_rows (id INT PRIMARY KEY)");
+
+    CancellationToken cancelled(std::chrono::steady_clock::now() + std::chrono::seconds(2));
+    cancelled.Cancel();
+    EXPECT_THROW(fixture.executor->ExecuteResult("SELECT id FROM cancel_rows",
+                                                 std::chrono::seconds(2), 100, &cancelled),
+                 DbError);
+
+    size_t failed_statement_index = 0;
+    EXPECT_THROW(fixture.executor->ExecuteBatch(
+                     {"INSERT INTO cancel_rows VALUES (1)", "SELECT id FROM cancel_rows"},
+                     std::chrono::seconds(2), 100, failed_statement_index, &cancelled),
+                 DbError);
+    const SqlExecutionResult result = fixture.executor->ExecuteResult(
+        "SELECT id FROM cancel_rows", std::chrono::seconds(2), 100);
+    EXPECT_TRUE(result.rows.empty());
+    fixture.bpm->AssertNoPinsHeld();
+}
+
 TEST(SqlExecutionTest, CatalogSupportsHundredsOfTablesAcrossRestartAndDrop) {
     TemporaryDatabase database;
     {

@@ -306,8 +306,10 @@ void CancellationToken::Cancel() noexcept {
 }
 
 void CancellationToken::Check() const {
-    if (cancelled_.load(std::memory_order_acquire) ||
-        std::chrono::steady_clock::now() >= deadline_) {
+    if (cancelled_.load(std::memory_order_acquire)) {
+        throw DbError(ErrorCode::QUERY_TIMEOUT, "Statement was cancelled");
+    }
+    if (std::chrono::steady_clock::now() >= deadline_) {
         throw DbError(ErrorCode::QUERY_TIMEOUT, "Statement execution timed out");
     }
 }

@@ -74,6 +74,100 @@ paths:
           $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
+  /api/v1/query/{request_id}:
+    delete:
+      operationId: cancelQuery
+      description: Requests cooperative cancellation of an active query or batch. Cancellation checks occur during execution and before transaction commit. The general API rate-limit bucket applies; X-API-Key is required when configured.
+      parameters:
+        - in: path
+          name: request_id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9._-]+$'
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+        - in: header
+          name: X-Request-Id
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+      responses:
+        "202":
+          description: Cancellation was signalled to an active statement.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, request_id, state]
+                properties:
+                  ok:
+                    const: true
+                  request_id:
+                    type: string
+                  state:
+                    const: cancellation_requested
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/activity:
+    get:
+      operationId: listActiveQueries
+      description: Returns at most 100 active single-statement or batch requests. Inspector rate-limit class; disabled when INSPECT_ENABLED=0. X-API-Key is required when API_KEY is configured. SQL previews contain only statement kinds, never parameter values.
+      parameters:
+        - in: header
+          name: X-API-Key
+          required: false
+          description: Required when the server has API_KEY configured.
+          schema:
+            type: string
+            maxLength: 4096
+      responses:
+        "200":
+          description: Bounded currently active request list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activity]
+                properties:
+                  activity:
+                    type: array
+                    maxItems: 100
+                    items:
+                      type: object
+                      required: [request_id, state, sql_preview, elapsed_ms]
+                      properties:
+                        request_id:
+                          type: string
+                          maxLength: 128
+                        state:
+                          const: running
+                        sql_preview:
+                          type: string
+                          maxLength: 64
+                        elapsed_ms:
+                          type: integer
+                          minimum: 0
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
   /api/v1/batch:
     post:
       operationId: executeAtomicBatch
@@ -1045,6 +1139,11 @@ components:
               minLength: 1
               maxLength: 16384
               description: Must start with BEGIN; and end with COMMIT; or ROLLBACK;.
+            params:
+              type: array
+              maxItems: 50
+              items:
+                type: [string, integer, number, boolean, "null"]
     BatchSuccess:
       type: object
       required: [ok, committed, results]

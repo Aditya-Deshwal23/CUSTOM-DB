@@ -2683,7 +2683,8 @@ class SqlExecutionEngine::Impl {
           statement_gate_(statement_gate),
           catalog_(buffer_pool_, owner_meta_page_id) {}
 
-    std::string Execute(std::string_view query, std::chrono::milliseconds timeout) {
+    std::string Execute(std::string_view query, std::chrono::milliseconds timeout,
+                        CancellationToken* external_cancellation = nullptr) {
         SqlStatement statement;
         try {
             statement = SqlParser(query).Parse();
@@ -2691,20 +2692,26 @@ class SqlExecutionEngine::Impl {
             throw DbError(ErrorCode::INVALID_ARGUMENT, error.what());
         }
         if (statement.kind == SqlStatementKind::EXPLAIN) {
-            return ExecuteExplain(statement, timeout);
+            return ExecuteExplain(statement, timeout, external_cancellation);
         }
         if (statement.kind == SqlStatementKind::SELECT ||
             statement.kind == SqlStatementKind::SHOW_TABLES ||
             statement.kind == SqlStatementKind::DESCRIBE) {
             StatementScope scope(statement_gate_, false,
                                  std::chrono::steady_clock::now() + timeout);
+            CancellationToken& cancellation =
+                external_cancellation == nullptr ? scope.Cancellation() : *external_cancellation;
+            cancellation.Check();
             std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
             if (statement.kind == SqlStatementKind::SELECT) {
-                return ExecuteSelect(statement, &scope.Cancellation(), nullptr);
+                return ExecuteSelect(statement, &cancellation, nullptr);
             }
             return ExecuteReadMetadata(statement);
         }
         StatementScope scope(statement_gate_, true, std::chrono::steady_clock::now() + timeout);
+        CancellationToken& cancellation =
+            external_cancellation == nullptr ? scope.Cancellation() : *external_cancellation;
+        cancellation.Check();
         std::unique_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
         catalog_.Reload();
         if (statement.kind == SqlStatementKind::CHECKPOINT) {
@@ -2725,9 +2732,10 @@ class SqlExecutionEngine::Impl {
         }
         try {
             ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                     &scope.Cancellation(), nullptr};
+                                     &cancellation, nullptr};
             const std::string result = ExecuteWrite(statement, context);
             if (transaction) {
+                cancellation.Check();
                 transaction->Commit();
             }
             RecordWrittenRows(result);
@@ -2751,7 +2759,8 @@ class SqlExecutionEngine::Impl {
     }
 
     SqlExecutionResult ExecuteResult(std::string_view query, std::chrono::milliseconds timeout,
-                                     uint64_t max_rows) {
+                                     uint64_t max_rows,
+                                     CancellationToken* external_cancellation) {
         SqlStatement statement;
         try {
             statement = SqlParser(query).Parse();
@@ -2762,15 +2771,18 @@ class SqlExecutionEngine::Impl {
         SqlExecutionResult result;
         result.statement = StatementName(statement.kind);
         if (statement.kind == SqlStatementKind::EXPLAIN) {
-            result.plan = Execute(query, timeout);
+            result.plan = Execute(query, timeout, external_cancellation);
             return result;
         }
         if (statement.kind == SqlStatementKind::SELECT) {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
             StatementScope scope(statement_gate_, false, deadline);
+            CancellationToken& cancellation =
+                external_cancellation == nullptr ? scope.Cancellation() : *external_cancellation;
+            cancellation.Check();
             std::shared_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
             CatalogTable& table = RequireTable(catalog_, statement.table);
-            ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &scope.Cancellation(),
+            ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &cancellation,
                                      nullptr};
             QueryPlan plan = BuildSelectPlan(context, table, statement);
             RecordPlanType(plan.access_path);
@@ -2801,6 +2813,9 @@ class SqlExecutionEngine::Impl {
         std::string output;
         if (mutating) {
             StatementScope scope(statement_gate_, true, std::chrono::steady_clock::now() + timeout);
+            CancellationToken& cancellation =
+                external_cancellation == nullptr ? scope.Cancellation() : *external_cancellation;
+            cancellation.Check();
             std::unique_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
             catalog_.Reload();
             if (wal_ == nullptr) {
@@ -2811,8 +2826,9 @@ class SqlExecutionEngine::Impl {
             try {
                 transaction = buffer_pool_->BeginTransaction(*wal_);
                 ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                         &scope.Cancellation(), nullptr};
+                                         &cancellation, nullptr};
                 output = ExecuteWrite(statement, context);
+                cancellation.Check();
                 transaction->Commit();
                 result.commit = transaction->CommitInfo();
                 RecordWrittenRows(output);
@@ -2833,7 +2849,7 @@ class SqlExecutionEngine::Impl {
                 throw;
             }
         } else {
-            output = Execute(query, timeout);
+            output = Execute(query, timeout, external_cancellation);
         }
         result.message = output;
         const std::string suffix = " row(s) affected";
@@ -2852,8 +2868,12 @@ class SqlExecutionEngine::Impl {
     std::vector<SqlExecutionResult> ExecuteBatch(const std::vector<std::string>& queries,
                                                  std::chrono::milliseconds timeout,
                                                  uint64_t max_rows,
-                                                 size_t& failed_statement_index) {
+                                                 size_t& failed_statement_index,
+                                                 CancellationToken* external_cancellation) {
         StatementScope scope(statement_gate_, true, std::chrono::steady_clock::now() + timeout);
+        CancellationToken& cancellation =
+            external_cancellation == nullptr ? scope.Cancellation() : *external_cancellation;
+        cancellation.Check();
         std::unique_lock<RankedSharedMutex> catalog_lock(catalog_gate_);
         catalog_.Reload();
         if (wal_ == nullptr) {
@@ -2867,6 +2887,7 @@ class SqlExecutionEngine::Impl {
         try {
             transaction = buffer_pool_->BeginTransaction(*wal_);
             for (size_t query_index = 0; query_index < queries.size(); ++query_index) {
+                cancellation.Check();
                 failed_statement_index = query_index;
                 SqlStatement statement;
                 try {
@@ -2880,7 +2901,7 @@ class SqlExecutionEngine::Impl {
                 if (statement.kind == SqlStatementKind::SELECT) {
                     CatalogTable& table = RequireTable(catalog_, statement.table);
                     ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                             &scope.Cancellation(), nullptr};
+                                             &cancellation, nullptr};
                     QueryPlan plan = BuildSelectPlan(context, table, statement);
                     RecordPlanType(plan.access_path);
                     result.columns = plan.output_schema.columns;
@@ -2904,7 +2925,7 @@ class SqlExecutionEngine::Impl {
                            statement.explained_statement &&
                            statement.explained_statement->kind == SqlStatementKind::SELECT) {
                     ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                             &scope.Cancellation(), nullptr};
+                                             &cancellation, nullptr};
                     result.message = StatementPlan(*statement.explained_statement, catalog_,
                                                    context);
                     result.plan = result.message;
@@ -2914,7 +2935,7 @@ class SqlExecutionEngine::Impl {
                                   "This statement is not supported in an atomic batch");
                 } else {
                     ExecutionContext context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                             &scope.Cancellation(), nullptr};
+                                             &cancellation, nullptr};
                     result.message = ExecuteWrite(statement, context);
                     const std::string suffix = " row(s) affected";
                     const size_t marker = result.message.find(suffix);
@@ -2930,6 +2951,7 @@ class SqlExecutionEngine::Impl {
                 }
                 results.push_back(std::move(result));
             }
+            cancellation.Check();
             transaction->Commit();
             for (const SqlExecutionResult& result : results) {
                 if (!result.message.empty()) {
@@ -3405,13 +3427,17 @@ class SqlExecutionEngine::Impl {
         }
     }
 
-    std::string ExecuteExplain(const SqlStatement& statement, std::chrono::milliseconds timeout) {
+    std::string ExecuteExplain(const SqlStatement& statement, std::chrono::milliseconds timeout,
+                               CancellationToken* external_cancellation) {
         if (!statement.explained_statement) {
             throw DbError(ErrorCode::INVALID_ARGUMENT, "EXPLAIN is missing its statement");
         }
         const SqlStatement& explained = *statement.explained_statement;
         const bool write = explained.kind != SqlStatementKind::SELECT;
         StatementScope scope(statement_gate_, write, std::chrono::steady_clock::now() + timeout);
+        CancellationToken& cancellation =
+            external_cancellation == nullptr ? scope.Cancellation() : *external_cancellation;
+        cancellation.Check();
         std::unique_lock<RankedSharedMutex> catalog_write_lock(catalog_gate_, std::defer_lock);
         std::shared_lock<RankedSharedMutex> catalog_read_lock(catalog_gate_, std::defer_lock);
         if (write) {
@@ -3422,7 +3448,7 @@ class SqlExecutionEngine::Impl {
         if (write) {
             catalog_.Reload();
         }
-        ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &scope.Cancellation(),
+        ExecutionContext context{&catalog_, buffer_pool_.get(), nullptr, &cancellation,
                                  nullptr};
         if (!statement.flag) {
             const std::string plan = StatementPlan(explained, catalog_, context);
@@ -3449,9 +3475,10 @@ class SqlExecutionEngine::Impl {
         try {
             OperatorStatsSink stats;
             ExecutionContext write_context{&catalog_, buffer_pool_.get(), transaction.get(),
-                                           &scope.Cancellation(), &stats};
+                                           &cancellation, &stats};
             const std::string affected = ExecuteWrite(explained, write_context);
             if (transaction) {
+                cancellation.Check();
                 transaction->Commit();
             }
             RecordWrittenRows(affected);
@@ -3504,14 +3531,16 @@ std::string SqlExecutionEngine::Execute(std::string_view query, std::chrono::mil
 
 SqlExecutionResult SqlExecutionEngine::ExecuteResult(std::string_view query,
                                                      std::chrono::milliseconds timeout,
-                                                     uint64_t max_rows) {
-    return impl_->ExecuteResult(query, timeout, max_rows);
+                                                     uint64_t max_rows,
+                                                     CancellationToken* external_cancellation) {
+    return impl_->ExecuteResult(query, timeout, max_rows, external_cancellation);
 }
 
 std::vector<SqlExecutionResult> SqlExecutionEngine::ExecuteBatch(
     const std::vector<std::string>& queries, std::chrono::milliseconds timeout, uint64_t max_rows,
-    size_t& failed_statement_index) {
-    return impl_->ExecuteBatch(queries, timeout, max_rows, failed_statement_index);
+    size_t& failed_statement_index, CancellationToken* external_cancellation) {
+    return impl_->ExecuteBatch(queries, timeout, max_rows, failed_statement_index,
+                               external_cancellation);
 }
 
 std::vector<SqlTableMetadata> SqlExecutionEngine::GetTables(uint64_t max_pages) {

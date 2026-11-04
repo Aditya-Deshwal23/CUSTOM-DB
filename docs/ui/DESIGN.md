@@ -21,6 +21,15 @@ engine-monitoring surfaces remain available below it for compatibility.
   before one atomic batch is sent.
 - Unknown, unavailable, and estimated data stays explicitly labeled. The UI
   does not synthesize row counts, storage measurements, or metrics.
+- The SQL workbench uses lexer-based statement boundaries, typed parameter
+  inputs, sequential run-all, and the server's atomic batch endpoint. Tabs and
+  the bounded query history are stored in versioned local storage.
+- The editor uses a locally served IBM Plex Mono font; no external font request
+  or runtime dependency is required.
+- Stop and Activity use request IDs and cooperative server cancellation. The
+  server exposes only statement-kind previews, not SQL parameter values.
+- Query plans show the server's text plan unless a structured `plan_tree` is
+  present; the UI does not invent plan nodes or execution measurements.
 - The grid keeps a bounded number of row elements in the DOM. Data pages are
   capped at 500 rows; exporting all rows has an explicit 5,000-row cap and
   cancellation.

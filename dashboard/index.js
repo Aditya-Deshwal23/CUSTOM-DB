@@ -1,6 +1,7 @@
 "use strict";
 
 import { startStudio } from "./js/studio.js";
+import { startSqlWorkbench } from "./js/workbench.js";
 
 const API_BASE_URL =
     window.location.port === "5500" || window.location.port === "5501"
@@ -8,7 +9,6 @@ const API_BASE_URL =
         : "";
 const POLL_INTERVAL_MS = 1000;
 const HISTORY_WINDOW_MS = 60_000;
-const QUERY_HISTORY_KEY = "custom-db-query-history";
 const replayMode = new URLSearchParams(window.location.search).get("replay") === "1";
 const SEED_SCRIPT = `CREATE TABLE Users (
   id INT PRIMARY KEY,
@@ -61,9 +61,6 @@ const state = {
     catalog: null,
     catalogSampledAt: 0,
     catalogEtag: "",
-    queryHistory: readQueryHistory(),
-    historyIndex: -1,
-    historyDraft: "",
     replay: null,
     replayInterval: null,
     replayStartedAt: 0,
@@ -95,31 +92,6 @@ function node(tag, className, text) {
         element.textContent = String(text);
     }
     return element;
-}
-
-function readQueryHistory() {
-    try {
-        const saved = window.localStorage.getItem(QUERY_HISTORY_KEY);
-        const parsed = saved ? JSON.parse(saved) : [];
-        return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
-    } catch (error) {
-        console.error("Could not read saved SQL history:", error);
-        return [];
-    }
-}
-
-function saveQueryHistory(sql) {
-    const history = state.queryHistory.filter((item) => item !== sql);
-    history.push(sql);
-    state.queryHistory = history.slice(-50);
-    state.historyIndex = -1;
-    state.historyDraft = "";
-    try {
-        window.localStorage.setItem(QUERY_HISTORY_KEY, JSON.stringify(state.queryHistory));
-    } catch (error) {
-        console.error("Could not save SQL history:", error);
-        setQueryStatus("Query history could not be saved in this browser.", true);
-    }
 }
 
 function setQueryStatus(message, isError = false) {
@@ -220,19 +192,28 @@ function ensureSuccess(result, path) {
 }
 
 async function fetchCatalog() {
-    const catalogResult = await requestJSON("catalog", "/api/v1/catalog", {
-        headers: state.catalogEtag ? { "If-None-Match": state.catalogEtag } : {}
-    });
-    if (catalogResult.status === 304) {
-        return state.catalog || [];
+    try {
+        const catalogResult = await requestJSON("catalog", "/api/v1/catalog", {
+            headers: state.catalogEtag ? { "If-None-Match": state.catalogEtag } : {}
+        });
+        if (catalogResult.status === 304) {
+            const tables = state.catalog || [];
+            window.dispatchEvent(new CustomEvent("custom-db:catalog", { detail: tables }));
+            return tables;
+        }
+        const tables = ensureSuccess(catalogResult, "/api/v1/catalog").tables;
+        if (!Array.isArray(tables)) {
+            throw new Error("Catalog response is missing its tables list.");
+        }
+        state.catalogEtag = catalogResult.etag || "";
+        window.dispatchEvent(new CustomEvent("custom-db:catalog", { detail: tables }));
+        return tables;
+    } catch (error) {
+        window.dispatchEvent(new CustomEvent("custom-db:catalog-error", {
+            detail: { message: error.message }
+        }));
+        throw error;
     }
-    const tables = ensureSuccess(catalogResult, "/api/v1/catalog").tables;
-    if (!Array.isArray(tables)) {
-        throw new Error("Catalog response is missing its tables list.");
-    }
-    state.catalogEtag = catalogResult.etag || "";
-    window.dispatchEvent(new CustomEvent("custom-db:catalog", { detail: tables }));
-    return tables;
 }
 
 async function pollLive() {
@@ -740,8 +721,7 @@ function clearPipeline() {
     }
 }
 
-function renderExplain(plan) {
-    const target = byId("queryResult");
+function renderExplain(plan, target = byId("queryResult")) {
     const parsed = parseOperatorMetrics(plan);
     if (parsed.actualRows !== null) {
         target.appendChild(node("p", "result-meta", `Actual rows: ${parsed.actualRows}`));
@@ -799,53 +779,6 @@ function renderQueryResponse(sql, result, elapsedStatus = null) {
     }
     if (elapsedStatus) {
         setQueryStatus(elapsedStatus);
-    }
-}
-
-async function runQuery(sql) {
-    const query = sql.trim();
-    if (!query) {
-        setQueryStatus("Enter a SQL statement first.", true);
-        return;
-    }
-    if (replayMode) {
-        setQueryStatus("Queries are read-only in replay mode.", true);
-        return;
-    }
-    const button = byId("runQueryButton");
-    button.disabled = true;
-    setQueryStatus("Sending SQL to the live engine…");
-    try {
-        const result = await requestJSON(`query-${query}`, "/api/v1/query", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sql: query })
-        });
-        saveQueryHistory(query);
-        renderQueryResponse(query, result);
-        if (!result.ok) {
-            setQueryStatus(`Engine returned ${result.status}.`, true);
-        } else {
-            setQueryStatus("Query completed on the live engine.");
-            try {
-                state.catalog = await fetchCatalog();
-                state.catalogSampledAt = Date.now();
-                renderCatalog(state.catalog);
-            } catch (error) {
-                console.error("Catalog refresh failed after query:", error);
-                setQueryStatus(`Query completed; catalog refresh failed: ${error.message}`, true);
-            }
-            pollLive();
-        }
-    } catch (error) {
-        if (error.name !== "AbortError") {
-            console.error("SQL request failed:", error);
-            renderError(query, { code: "REQUEST_ERROR", message: error.message });
-            setQueryStatus(`Query request failed: ${error.message}`, true);
-        }
-    } finally {
-        button.disabled = replayMode;
-        byId("sqlInput").focus();
     }
 }
 
@@ -987,42 +920,8 @@ async function startReplay() {
     }
 }
 
-function onHistoryKey(event) {
-    const input = byId("sqlInput");
-    if (event.key === "ArrowUp" && input.selectionStart === 0 && input.selectionEnd === 0) {
-        if (state.queryHistory.length === 0) {
-            return;
-        }
-        event.preventDefault();
-        if (state.historyIndex === -1) {
-            state.historyDraft = input.value;
-            state.historyIndex = state.queryHistory.length;
-        }
-        state.historyIndex = Math.max(0, state.historyIndex - 1);
-        input.value = state.queryHistory[state.historyIndex];
-        input.setSelectionRange(0, 0);
-    } else if (event.key === "ArrowDown" && state.historyIndex !== -1 &&
-        (input.selectionStart === 0 || input.selectionStart === input.value.length)) {
-        event.preventDefault();
-        state.historyIndex += 1;
-        if (state.historyIndex >= state.queryHistory.length) {
-            state.historyIndex = -1;
-            input.value = state.historyDraft;
-        } else {
-            input.value = state.queryHistory[state.historyIndex];
-        }
-        input.setSelectionRange(input.value.length, input.value.length);
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-        event.preventDefault();
-        runQuery(input.value);
-    }
-}
-
 function init() {
     startStudio();
-    byId("runQueryButton").addEventListener("click", () => runQuery(byId("sqlInput").value));
-    byId("sqlInput").addEventListener("keydown", onHistoryKey);
     byId("retryButton").addEventListener("click", () => {
         state.failures = 0;
         state.nextPollAt = 0;
@@ -1039,6 +938,14 @@ function init() {
             setText("studioStatus", `Request failed (${error.status || "network"}); retrying in 2 s.`);
         });
     });
+    window.addEventListener("custom-db:workbench-result", (event) => {
+        const result = event.detail.result;
+        if (result?.statement === "EXPLAIN" && result.plan) {
+            renderExplain(result.plan, byId("planPanel"));
+        } else {
+            clearPipeline();
+        }
+    });
     byId("queryTab").addEventListener("click", () => {
         byId("sqlInput").focus();
         byId("sqlInput").scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1046,6 +953,7 @@ function init() {
     byId("erTab").addEventListener("click", () => {
         window.location.hash = "#/er";
     });
+    startSqlWorkbench();
     document.addEventListener("visibilitychange", () => {
         if (document.hidden) {
             stopPolling();

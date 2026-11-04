@@ -97,6 +97,54 @@ bool IsWrite(SqlStatementKind kind) {
            kind != SqlStatementKind::SHOW_TABLES && kind != SqlStatementKind::DESCRIBE;
 }
 
+bool IsSafeQueryRequestId(std::string_view value) {
+    return !value.empty() && value.size() <= 128U &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+               return std::isalnum(character) != 0 || character == '-' || character == '_' ||
+                      character == '.';
+           });
+}
+
+class ActiveQueryRegistration {
+   public:
+    ActiveQueryRegistration(ApiServer::Impl& server, const std::string& request_id,
+                            std::string_view statement, std::chrono::milliseconds timeout)
+        : server_(server), request_id_(request_id) {
+        cancellation_ = std::make_shared<CancellationToken>(
+            std::chrono::steady_clock::now() + timeout);
+        std::lock_guard<std::mutex> lock(server_.active_queries_mutex);
+        if (server_.active_queries.size() >= 100U ||
+            server_.active_queries.find(request_id_) != server_.active_queries.end()) {
+            cancellation_.reset();
+            return;
+        }
+        ActiveQuery query;
+        query.request_id = request_id_;
+        query.sql_preview = std::string(statement) + " statement";
+        query.started = std::chrono::steady_clock::now();
+        query.cancellation = cancellation_;
+        server_.active_queries.emplace(request_id_, std::move(query));
+    }
+
+    ~ActiveQueryRegistration() {
+        if (!cancellation_) return;
+        std::lock_guard<std::mutex> lock(server_.active_queries_mutex);
+        server_.active_queries.erase(request_id_);
+    }
+
+    ActiveQueryRegistration(const ActiveQueryRegistration&) = delete;
+    ActiveQueryRegistration& operator=(const ActiveQueryRegistration&) = delete;
+
+    CancellationToken* Cancellation() const noexcept {
+        return cancellation_.get();
+    }
+
+   private:
+    ApiServer::Impl& server_;
+    const std::string& request_id_;
+    std::shared_ptr<CancellationToken> cancellation_;
+};
+
 std::string ErrorCodeName(const DbError& error) {
     switch (error.Code()) {
         case ErrorCode::INVALID_DB_FILE:
@@ -475,11 +523,17 @@ crow::response HandleQuery(ApiServer::Impl& server, const crow::request& request
     }
 
     const auto started = std::chrono::steady_clock::now();
+    ActiveQueryRegistration active_query(
+        server, request_id, SqlStatementName(statement.kind),
+        std::chrono::milliseconds(server.config.statement_timeout_ms));
+    if (active_query.Cancellation() == nullptr) {
+        return fail(429, "BUSY", "Too many active statements or duplicate request ID");
+    }
     try {
         PageTouchScope page_touch_scope;
         SqlExecutionResult result = server.executor->ExecuteResult(
             bound_sql, std::chrono::milliseconds(server.config.statement_timeout_ms),
-            server.config.max_result_rows);
+            server.config.max_result_rows, active_query.Cancellation());
         const PageTouchCounts page_touches = page_touch_scope.Snapshot();
         const uint64_t elapsed = static_cast<uint64_t>(
             std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::microseconds>(
@@ -696,6 +750,10 @@ void ApiServer::Impl::RegisterRoutes() {
         .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
             return ServeStatic(*this, request, "index.js", "application/javascript; charset=utf-8");
         });
+    CROW_ROUTE(app, "/fonts/IBMPlexMono-Regular.woff2")
+        .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
+            return ServeStatic(*this, request, "fonts/IBMPlexMono-Regular.woff2", "font/woff2");
+        });
     CROW_ROUTE(app, "/js/<path>")
         .methods(crow::HTTPMethod::GET)(
             [this](const crow::request& request, const std::string& path) {
@@ -734,9 +792,75 @@ void ApiServer::Impl::RegisterRoutes() {
     CROW_ROUTE(app, "/api/v1/query")
         .methods(crow::HTTPMethod::POST)(
             [this](const crow::request& request) { return HandleQuery(*this, request, false); });
+    CROW_ROUTE(app, "/api/v1/query/<string>")
+        .methods(crow::HTTPMethod::DELETE)(
+            [this](const crow::request& request, const std::string& request_id) {
+                ApiMiddleware::context& context = RequestContext(app, request);
+                if (!IsSafeQueryRequestId(request_id)) {
+                    return ErrorResponse(400, "INVALID_REQUEST_ID",
+                                         "Request ID must be a bounded safe identifier",
+                                         context.request_id);
+                }
+                if (!config.api_key.empty() &&
+                    !ApiKeyMatches(config.api_key, request.get_header_value("X-API-Key"))) {
+                    return ErrorResponse(401, "API_KEY_REQUIRED",
+                                         "A valid X-API-Key is required", context.request_id);
+                }
+                std::shared_ptr<CancellationToken> cancellation;
+                {
+                    std::lock_guard<std::mutex> lock(active_queries_mutex);
+                    const auto active = active_queries.find(request_id);
+                    if (active != active_queries.end()) {
+                        cancellation = active->second.cancellation;
+                    }
+                }
+                if (!cancellation) {
+                    return ErrorResponse(404, "QUERY_NOT_ACTIVE",
+                                         "No active query has that request ID",
+                                         context.request_id);
+                }
+                cancellation->Cancel();
+                crow::json::wvalue response;
+                response["ok"] = true;
+                response["request_id"] = request_id;
+                response["state"] = "cancellation_requested";
+                return JsonResponse(202, response);
+            });
     CROW_ROUTE(app, "/api/v1/batch")
         .methods(crow::HTTPMethod::POST)(
             [this](const crow::request& request) { return HandleBatch(*this, request); });
+    CROW_ROUTE(app, "/api/v1/activity")
+        .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
+            ApiMiddleware::context& context = RequestContext(app, request);
+            std::vector<ActiveQuery> queries;
+            {
+                std::lock_guard<std::mutex> lock(active_queries_mutex);
+                queries.reserve(active_queries.size());
+                for (const auto& entry : active_queries) {
+                    queries.push_back(entry.second);
+                }
+            }
+            std::sort(queries.begin(), queries.end(), [](const ActiveQuery& left,
+                                                         const ActiveQuery& right) {
+                return left.started < right.started;
+            });
+            crow::json::wvalue response;
+            crow::json::wvalue::list activity;
+            const auto now = std::chrono::steady_clock::now();
+            for (const ActiveQuery& query : queries) {
+                crow::json::wvalue item;
+                item["request_id"] = query.request_id;
+                item["state"] = "running";
+                item["sql_preview"] = query.sql_preview;
+                item["elapsed_ms"] = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - query.started)
+                        .count());
+                activity.push_back(std::move(item));
+            }
+            response["activity"] = std::move(activity);
+            response["request_id"] = context.request_id;
+            return JsonResponse(200, response);
+        });
     CROW_ROUTE(app, "/api/query")
         .methods(crow::HTTPMethod::POST)(
             [this](const crow::request& request) { return HandleQuery(*this, request, true); });

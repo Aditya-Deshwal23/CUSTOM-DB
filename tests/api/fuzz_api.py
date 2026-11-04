@@ -120,6 +120,7 @@ def main():
                         + urlencode({"max_nodes": malformed}),
                         "/api/v1/inspect/indexes/missing/trace?"
                         + urlencode({"key": malformed}),
+                        "/api/v1/query/" + quote(malformed, safe=""),
                     )
                     requests.append(
                         (
@@ -128,6 +129,10 @@ def main():
                             "application/json",
                             "GET",
                         )
+                    )
+                elif index % 8 == 1:
+                    requests.append(
+                        ("/api/v1/activity", b"", "application/json", "GET")
                     )
                 elif index % 3 == 0:
                     query = "".join(

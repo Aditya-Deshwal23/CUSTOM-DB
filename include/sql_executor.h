@@ -152,11 +152,13 @@ class SqlExecutionEngine {
         std::string_view query,
         std::chrono::milliseconds timeout = std::chrono::milliseconds(STATEMENT_GATE_TIMEOUT_MS));
     SqlExecutionResult ExecuteResult(std::string_view query, std::chrono::milliseconds timeout,
-                                     uint64_t max_rows);
+                                     uint64_t max_rows,
+                                     CancellationToken* external_cancellation = nullptr);
     std::vector<SqlExecutionResult> ExecuteBatch(const std::vector<std::string>& queries,
                                                  std::chrono::milliseconds timeout,
                                                  uint64_t max_rows,
-                                                 size_t& failed_statement_index);
+                                                 size_t& failed_statement_index,
+                                                 CancellationToken* external_cancellation = nullptr);
     std::vector<SqlTableMetadata> GetTables(uint64_t max_pages);
     std::optional<SqlTableMetadata> GetTable(std::string_view name);
     SqlIndexTreeInspection InspectIndexTree(std::string_view name, uint64_t max_nodes);
