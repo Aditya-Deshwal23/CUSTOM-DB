@@ -30,7 +30,9 @@ ApiServer::Impl::Impl(std::shared_ptr<BufferPoolManager> buffer_pool,
         file_manager->SetMaxBytes(config.max_db_bytes);
     }
 
-    for (const char* file_name : {"index.html", "index.css", "index.js"}) {
+    for (const char* file_name :
+         {"index.html", "index.css", "index.js", "js/filter.js", "js/exporters.js",
+          "js/er-layout.js", "js/grid.js", "js/studio.js"}) {
         const std::string file(file_name);
         std::ifstream input(static_path + "/" + file, std::ios::binary);
         if (input) {

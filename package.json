@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:ui": "node --test tests/ui/*.test.js"
+  },
+  "devDependencies": {
+    "axe-core": "^4.14.0"
+  }
+}

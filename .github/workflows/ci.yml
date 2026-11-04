@@ -81,6 +81,12 @@ jobs:
           python -m pip install --require-hashes -r tests/api/requirements.txt
           python -m pip install --require-hashes -r tests/dashboard/requirements.txt
           python -m playwright install --with-deps chromium
+      - name: Install UI test-only dependencies
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: npm ci
+      - name: Run UI module unit tests
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
+        run: npm run test:ui
       - name: Run real-binary API contract tests
         if: matrix.compiler == 'gcc' && matrix.build_type == 'Debug'
         env:

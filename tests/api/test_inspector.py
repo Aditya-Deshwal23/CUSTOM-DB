@@ -84,7 +84,7 @@ def test_buffer_pool_compact_format_and_legacy_compatibility(api_server):
 
 def test_catalog_is_returned_in_one_bounded_response(api_server):
     assert post_sql(api_server, "CREATE TABLE inspector_catalog (id INT PRIMARY KEY)")[0] == 200
-    status, catalog, _ = request_json(api_server, "/api/v1/catalog")
+    status, catalog, headers = request_json(api_server, "/api/v1/catalog")
 
     assert status == 200
     assert len(catalog["tables"]) == 1
@@ -93,6 +93,19 @@ def test_catalog_is_returned_in_one_bounded_response(api_server):
     assert {"columns", "indexes", "heap", "row_estimate", "ddl"} <= table.keys()
     assert table["columns"][0]["pk"] is True
     assert "CREATE TABLE inspector_catalog" in table["ddl"]
+    histogram = table["heap"]["free_space_histogram"]
+    assert [bucket["range"] for bucket in histogram] == [
+        "0-25%",
+        "25-50%",
+        "50-75%",
+        "75-100%",
+    ]
+    assert sum(bucket["pages"] for bucket in histogram) == table["heap"]["pages"] - 1
+    cached_status, cached_body, cached_headers = http_request(
+        api_server, "/api/v1/catalog", headers={"If-None-Match": headers["ETag"]}
+    )
+    assert cached_status == 304 and cached_body == b""
+    assert cached_headers["ETag"] == headers["ETag"]
 
     before_status, before, _ = request_json(
         api_server, "/api/v1/stats/buffer_pool?format=legacy"

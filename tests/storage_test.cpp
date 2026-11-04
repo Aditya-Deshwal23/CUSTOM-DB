@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -328,6 +329,24 @@ TEST(TableHeapTest, RebuildsReclaimedPagesAfterReopen) {
         const RID reused = heap.Insert(Tuple{std::byte{0x01}});
         EXPECT_EQ(reused.page_id, first.page_id);
     }
+}
+
+TEST(TableHeapTest, InspectionReportsRealFreeSpaceHistogramForDataPages) {
+    TemporaryDatabase database;
+    auto disk = std::make_shared<FileDiskManager>(database.String());
+    BufferPoolManager buffer_pool(4, disk);
+    TableHeap heap = TableHeap::Create(buffer_pool);
+    Tuple tuple(512, std::byte{0x2a});
+    for (size_t index = 0; index < 40U; ++index) {
+        static_cast<void>(heap.Insert(tuple));
+    }
+
+    const relational_db::TableHeapInspection inspection = heap.Inspect();
+    const uint64_t histogram_pages =
+        std::accumulate(inspection.free_space_histogram.begin(),
+                        inspection.free_space_histogram.end(), uint64_t{0});
+    EXPECT_EQ(histogram_pages, inspection.pages - 1U);
+    EXPECT_EQ(inspection.tuples, 40U);
 }
 
 TEST(RIDTest, PacksAndUnpacksPageAndSlot) {

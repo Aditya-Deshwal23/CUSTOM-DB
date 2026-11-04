@@ -87,7 +87,7 @@ void ApplyResponseHeaders(crow::response& response, bool trusted_https) {
     response.add_header(
         "Permissions-Policy",
         "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), browsing-topics=(), "
-        "camera=(), clipboard-read=(), clipboard-write=(), cross-origin-isolated=(), "
+        "camera=(), clipboard-read=(), clipboard-write=(self), cross-origin-isolated=(), "
         "display-capture=(), encrypted-media=(), execution-while-not-rendered=(), "
         "execution-while-out-of-viewport=(), fullscreen=(), geolocation=(), gyroscope=(), "
         "identity-credentials-get=(), join-ad-interest-group=(), keyboard-map=(), "

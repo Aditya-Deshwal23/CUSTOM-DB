@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -694,6 +696,12 @@ void ApiServer::Impl::RegisterRoutes() {
         .methods(crow::HTTPMethod::GET)([this](const crow::request& request) {
             return ServeStatic(*this, request, "index.js", "application/javascript; charset=utf-8");
         });
+    CROW_ROUTE(app, "/js/<path>")
+        .methods(crow::HTTPMethod::GET)(
+            [this](const crow::request& request, const std::string& path) {
+                return ServeStatic(*this, request, "js/" + path,
+                                   "application/javascript; charset=utf-8");
+            });
 
     CROW_ROUTE(app, "/healthz").methods(crow::HTTPMethod::GET)([]() {
         crow::json::wvalue response;
@@ -894,6 +902,16 @@ void ApiServer::Impl::RegisterRoutes() {
                 item["heap"]["tuples_estimate"] = table.heap.tuples;
                 item["heap"]["bytes_used"] = table.heap.bytes_used;
                 item["heap"]["bytes_free"] = table.heap.bytes_free;
+                crow::json::wvalue::list free_space_histogram;
+                constexpr std::array<std::string_view, 4> kFreeSpaceRanges{"0-25%", "25-50%",
+                                                                           "50-75%", "75-100%"};
+                for (size_t bucket = 0; bucket < kFreeSpaceRanges.size(); ++bucket) {
+                    crow::json::wvalue item;
+                    item["range"] = std::string(kFreeSpaceRanges[bucket]);
+                    item["pages"] = table.heap.free_space_histogram[bucket];
+                    free_space_histogram.push_back(std::move(item));
+                }
+                item["heap"]["free_space_histogram"] = std::move(free_space_histogram);
                 item["ddl"] = RoundTripDdl(ddl);
                 table_list.push_back(std::move(item));
             }
@@ -905,7 +923,18 @@ void ApiServer::Impl::RegisterRoutes() {
                                      "Catalog response exceeds the 8 MiB inspection limit",
                                      context.request_id);
             }
-            return JsonResponse(200, response);
+            const std::string etag =
+                "\"" + std::to_string(std::hash<std::string>{}(serialized)) + "\"";
+            if (request.get_header_value("If-None-Match") == etag) {
+                crow::response not_modified(304);
+                not_modified.add_header("ETag", etag);
+                not_modified.add_header("Cache-Control", "private, no-cache");
+                return not_modified;
+            }
+            crow::response result = JsonResponse(200, response);
+            result.add_header("ETag", etag);
+            result.add_header("Cache-Control", "private, no-cache");
+            return result;
         });
 
     CROW_ROUTE(app, "/api/v1/snapshot")

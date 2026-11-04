@@ -377,6 +377,11 @@ TableHeapInspection TableHeap::Inspect(uint64_t max_pages) const {
         const uint64_t free_bytes = page.GetFreeSpaceRemaining();
         summary.bytes_free += free_bytes;
         summary.bytes_used += PAGE_DATA_SIZE - free_bytes;
+        const size_t bucket = std::min<size_t>(
+            summary.free_space_histogram.size() - 1U,
+            static_cast<size_t>((free_bytes * summary.free_space_histogram.size()) /
+                                PAGE_DATA_SIZE));
+        ++summary.free_space_histogram[bucket];
         page_id = page.GetNextPageId();
         ++summary.pages;
     }

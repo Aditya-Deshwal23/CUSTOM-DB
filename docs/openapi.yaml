@@ -368,6 +368,11 @@ paths:
       responses:
         "200":
           description: Full catalog within the 8 MiB response limit.
+          headers:
+            ETag:
+              description: Stable validator for conditional catalog refresh.
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -378,6 +383,30 @@ paths:
                     type: array
                     items:
                       type: object
+                      properties:
+                        heap:
+                          type: object
+                          properties:
+                            free_space_histogram:
+                              type: array
+                              minItems: 4
+                              maxItems: 4
+                              items:
+                                type: object
+                                required: [range, pages]
+                                properties:
+                                  range:
+                                    type: string
+                                    enum: ["0-25%", "25-50%", "50-75%", "75-100%"]
+                                  pages:
+                                    type: integer
+                                    minimum: 0
+        "304":
+          description: Catalog has not changed.
+          headers:
+            ETag:
+              schema:
+                type: string
         "401":
           $ref: "#/components/responses/ApiError"
         "404":

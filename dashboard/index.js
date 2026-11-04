@@ -1,10 +1,12 @@
 "use strict";
 
+import { startStudio } from "./js/studio.js";
+
 const API_BASE_URL =
     window.location.port === "5500" || window.location.port === "5501"
         ? "http://127.0.0.1:8080"
         : "";
-const POLL_INTERVAL_MS = 500;
+const POLL_INTERVAL_MS = 1000;
 const HISTORY_WINDOW_MS = 60_000;
 const QUERY_HISTORY_KEY = "custom-db-query-history";
 const replayMode = new URLSearchParams(window.location.search).get("replay") === "1";
@@ -58,6 +60,7 @@ const state = {
     frameSignature: "",
     catalog: null,
     catalogSampledAt: 0,
+    catalogEtag: "",
     queryHistory: readQueryHistory(),
     historyIndex: -1,
     historyDraft: "",
@@ -178,13 +181,21 @@ function requestJSON(key, path, options = {}) {
             ...(options.headers || {})
         }
     }).then(async (response) => {
+        if (response.status === 304) {
+            return { ok: true, status: 304, data: null, etag: response.headers.get("ETag") };
+        }
         let data;
         try {
             data = await response.json();
         } catch (error) {
             throw new Error(`Invalid JSON from ${path}: ${error.message}`);
         }
-        return { ok: response.ok, status: response.status, data };
+        return {
+            ok: response.ok,
+            status: response.status,
+            data,
+            etag: response.headers.get("ETag")
+        };
     }).finally(() => {
         state.inFlight.delete(key);
         state.controllers.delete(controller);
@@ -209,16 +220,19 @@ function ensureSuccess(result, path) {
 }
 
 async function fetchCatalog() {
-    const tablesResult = await requestJSON("catalog-names", "/api/v1/tables");
-    const tables = ensureSuccess(tablesResult, "/api/v1/tables").tables;
+    const catalogResult = await requestJSON("catalog", "/api/v1/catalog", {
+        headers: state.catalogEtag ? { "If-None-Match": state.catalogEtag } : {}
+    });
+    if (catalogResult.status === 304) {
+        return state.catalog || [];
+    }
+    const tables = ensureSuccess(catalogResult, "/api/v1/catalog").tables;
     if (!Array.isArray(tables)) {
         throw new Error("Catalog response is missing its tables list.");
     }
-    const details = await Promise.all(tables.map(async (tableName) => {
-        const result = await requestJSON(`catalog-${tableName}`, `/api/v1/tables/${encodeURIComponent(tableName)}`);
-        return ensureSuccess(result, `/api/v1/tables/${tableName}`);
-    }));
-    return details;
+    state.catalogEtag = catalogResult.etag || "";
+    window.dispatchEvent(new CustomEvent("custom-db:catalog", { detail: tables }));
+    return tables;
 }
 
 async function pollLive() {
@@ -227,7 +241,7 @@ async function pollLive() {
     }
     state.polling = true;
     try {
-        const refreshCatalog = state.catalog === null || Date.now() - state.catalogSampledAt >= 30_000;
+        const refreshCatalog = state.catalog === null || Date.now() - state.catalogSampledAt >= 10_000;
         const [statsResult, framesResult, storageResult, versionResult, catalog] = await Promise.all([
             requestJSON("stats", "/api/v1/stats"),
             requestJSON("buffer-pool", "/api/v1/stats/buffer_pool"),
@@ -522,6 +536,12 @@ function renderCatalog(catalog) {
         return;
     }
 
+    if (tables.length > 100) {
+        atlas.appendChild(node("p", "empty-state",
+            `${tables.length.toLocaleString()} tables are available in Explorer; the overview is condensed to keep the page responsive.`));
+        return;
+    }
+
     for (const table of tables) {
         const card = node("article", "schema-table");
         card.setAttribute("aria-label", `Table ${table.name}`);
@@ -530,14 +550,14 @@ function renderCatalog(catalog) {
         title.appendChild(rowCount);
         card.appendChild(title);
         const columns = node("ul", "schema-columns");
-        for (const column of table.schema || []) {
+        for (const column of table.columns || table.schema || []) {
             const item = node("li", "schema-column");
             const name = node("span", "", column.name);
             const type = node("span", "column-type", column.type);
             item.append(name, type);
-            if (column.primary_key || column.references) {
+            if (column.primary_key || column.pk || column.references) {
                 const constraints = [];
-                if (column.primary_key) {
+                if (column.primary_key || column.pk) {
                     constraints.push("PRIMARY KEY");
                 }
                 if (column.references) {
@@ -1000,6 +1020,7 @@ function onHistoryKey(event) {
 }
 
 function init() {
+    startStudio();
     byId("runQueryButton").addEventListener("click", () => runQuery(byId("sqlInput").value));
     byId("sqlInput").addEventListener("keydown", onHistoryKey);
     byId("retryButton").addEventListener("click", () => {
@@ -1008,6 +1029,23 @@ function init() {
         pollLive();
     });
     byId("loadDemoButton").addEventListener("click", runSeedScript);
+    window.addEventListener("custom-db:catalog-request", () => {
+        fetchCatalog().then((catalog) => {
+            state.catalog = catalog;
+            state.catalogSampledAt = Date.now();
+            renderCatalog(catalog);
+        }).catch((error) => {
+            console.error("Catalog refresh failed:", error);
+            setText("studioStatus", `Request failed (${error.status || "network"}); retrying in 2 s.`);
+        });
+    });
+    byId("queryTab").addEventListener("click", () => {
+        byId("sqlInput").focus();
+        byId("sqlInput").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    byId("erTab").addEventListener("click", () => {
+        window.location.hash = "#/er";
+    });
     document.addEventListener("visibilitychange", () => {
         if (document.hidden) {
             stopPolling();

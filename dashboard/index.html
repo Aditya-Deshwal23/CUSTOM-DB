@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#05070a">
-    <title>StorageEngine Observability</title>
+    <title>CUSTOM-DB Studio</title>
     <link rel="stylesheet" href="index.css">
-    <script src="index.js" defer></script>
+    <script type="module" src="index.js"></script>
 </head>
 <body>
     <div class="app-container">
@@ -15,7 +15,7 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                 </svg>
-                <h1>StorageEngine</h1>
+                <h1>CUSTOM-DB Studio</h1>
             </a>
             <div class="status-container">
                 <div id="mainStatusBadge" class="status-badge" role="status" aria-live="polite">
@@ -36,6 +36,44 @@
             <h2 id="offlineTitle">Engine unavailable</h2>
             <p id="offlineMessage">No engine values are being displayed.</p>
         </section>
+
+        <section class="studio-shell" aria-label="Database workbench">
+            <aside class="explorer-panel" aria-label="Object explorer">
+                <div class="explorer-heading">
+                    <h2>Explorer</h2>
+                    <button id="explorerRefresh" class="icon-button" type="button"
+                            aria-label="Refresh catalog" title="Refresh catalog (F5)">↻</button>
+                </div>
+                <label class="sr-only" for="explorerFilter">Filter database objects</label>
+                <input id="explorerFilter" class="control explorer-filter"
+                       type="search" placeholder="Filter objects…">
+                <div id="explorerTree" class="explorer-tree" aria-busy="true">
+                    <p class="skeleton-grid">Loading catalog…</p>
+                </div>
+                <button id="openErButton" class="button button-secondary er-open-button"
+                        type="button">ER diagram</button>
+            </aside>
+            <section class="studio-main" aria-label="Studio views">
+                <div class="studio-topbar">
+                    <div class="studio-global-tabs" role="tablist" aria-label="Workspace">
+                        <button class="global-tab" type="button" role="tab"
+                                aria-selected="true" id="queryTab">Query</button>
+                        <button class="global-tab" type="button" role="tab"
+                                aria-selected="false" id="erTab">ER diagram</button>
+                    </div>
+                    <span id="studioMode" class="mode-badge" title="Engine write mode">MODE UNKNOWN</span>
+                    <span id="studioStatus" class="studio-status" role="status" aria-live="polite">
+                        Connecting…
+                    </span>
+                </div>
+                <div id="studioView" class="studio-view">
+                    <h2>CUSTOM-DB Studio</h2>
+                    <p class="empty-state">Choose an object in Explorer to get started.</p>
+                </div>
+            </section>
+        </section>
+        <div id="studioContextMenu" class="context-menu" role="menu" hidden></div>
+        <dialog id="studioDialog" class="studio-dialog" aria-label="Database action"></dialog>
 
         <main class="dashboard-grid">
             <section class="telemetry-ribbon" aria-label="Live engine telemetry">

@@ -37,6 +37,7 @@ struct TableHeapInspection {
     uint64_t tuples{0};
     uint64_t bytes_used{0};
     uint64_t bytes_free{0};
+    std::array<uint64_t, 4> free_space_histogram{};
 };
 
 struct TableHeapPageInspection {
