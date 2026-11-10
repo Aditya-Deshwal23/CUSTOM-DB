@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM debian:12-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS builder
+FROM debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /src
@@ -36,8 +36,8 @@ RUN --mount=type=cache,target=/root/.cache/cmake-fetchcontent,sharing=locked \
     && strip --strip-unneeded build/relational_db \
     && install -d -o 10001 -g 10001 /data
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:732d2fe38bb1996cb47f8218b48dc840967684d73c5483894ff2ed638068c1b6 AS runtime-amd64
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:91e80685018de611a20450bed6b011c3d3242b3d9cc4452208121f342703ada0 AS runtime-arm64
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab AS runtime-amd64
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab AS runtime-arm64
 # Architecture selects one of the pinned minimal runtime manifests above.
 # hadolint ignore=DL3006
 FROM runtime-${TARGETARCH} AS runtime
