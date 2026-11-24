@@ -36,8 +36,8 @@ RUN --mount=type=cache,target=/root/.cache/cmake-fetchcontent,sharing=locked \
     && strip --strip-unneeded build/relational_db \
     && install -d -o 10001 -g 10001 /data
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:732d2fe38bb1996cb47f8218b48dc840967684d73c5483894ff2ed638068c1b6 AS runtime-amd64
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:91e80685018de611a20450bed6b011c3d3242b3d9cc4452208121f342703ada0 AS runtime-arm64
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:532c7a94f9e96ba9db75eb9388f4227751131c7cb0a411d1a8521af4096135de AS runtime-amd64
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:532c7a94f9e96ba9db75eb9388f4227751131c7cb0a411d1a8521af4096135de AS runtime-arm64
 # Architecture selects one of the pinned minimal runtime manifests above.
 # hadolint ignore=DL3006
 FROM runtime-${TARGETARCH} AS runtime
