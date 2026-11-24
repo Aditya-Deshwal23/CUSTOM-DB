@@ -1,5 +1,5 @@
 openapi-spec-validator>=0.7,<1
 prometheus-client>=0.20,<1
 pytest>=8,<9
-PyYAML>=6,<7
-schemathesis>=3.37,<4
+PyYAML>=6.0.4,<7
+schemathesis>=4.33.4,<5
